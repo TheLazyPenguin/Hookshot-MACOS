@@ -18,6 +18,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+RUN_ALL_ARGS = ["--cxx", "g++"]
+
 
 # The override runs the same regression against the exact original production source.
 SOURCE = Path(os.environ.get("HOOKSHOT_CPP_TEST_SOURCE", Path(__file__).resolve().parents[1] / "nx2" / "make_game.py"))

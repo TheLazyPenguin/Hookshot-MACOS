@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import zlib
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

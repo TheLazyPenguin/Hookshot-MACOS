@@ -383,8 +383,18 @@ static int env_line_allowed(const char *name, const char *value) {
     /* (hookshot) the switches that name a file to write or a folder take no value here, not even a bare name: one
        resolves in the game's folder (HOS_SAMPLE_FILE=hookshot_vk.dll emptied the renderer) */
     const size_t nl = strlen(name);
-    const int names_file = (nl > 5 && (!strcmp(name + nl - 5, "_FILE") || !strcmp(name + nl - 4, "_DIR"))) ||
-                           !strcmp(name, "RX_VK_FRAME_LOG") || !strcmp(name, "HOS_PRESENT_TRACE");
+    int names_file = (nl > 5 && (!strcmp(name + nl - 5, "_FILE") || !strcmp(name + nl - 4, "_DIR"))) ||
+                     !strcmp(name, "RX_VK_FRAME_LOG") || !strcmp(name, "HOS_PRESENT_TRACE");
+    /* (hookshot) and the test switches whose value is a file or folder under another name (HOS_AUDIO_DUMP=image.bin
+       overwrote the game's image), or that press buttons and menu keys on a timer (a shared file erased a save from
+       the file select) */
+    static const char *const by_name[] = {
+        "HOS_AUDIO_DUMP", "HOS_AUDIO_WB_DUMP", "HOS_SHADER_DUMP", "HOS_FS_OVERLAY", "HOS_MODS", "HOS_INPUT_LIVE",
+        "HOS_INPUT_SCRIPT", "HOS_SAMPLE_ALL", "HOS_WATCH", "HOOKSHOT_BUILDER_HOME", "RX_VK_SHOTS", "RX_VK_SHOT_GO",
+        "RX_VK_FRAMELOG", "RX_VK_HANG_DUMP", "RX_VK_DUMP", "RX_VK_DUMP_SPV", "RX_VK_DUMP_MESH_SPV", "RX_VK_DUMP_STAGES",
+        "RX_VK_DUMP_FAILED", "RX_VK_IR", "RX_VK_MENU_SCRIPT", "RX_DUMP_WGSL", "RX_DUMP_SLOW_WGSL", "RX_DUMP_TICS",
+        "RX_WGSL_OVERRIDE"};
+    for (size_t i = 0; i < sizeof by_name / sizeof *by_name; i++) names_file |= !strcmp(name, by_name[i]);
     /* RX_VK_DLSS_DIR: a folder on this PC, not a share (\\server\x or //server/x) or a device path */
     if (!strcmp(name, "RX_VK_DLSS_DIR"))
         return !((value[0] == '\\' || value[0] == '/') && (value[1] == '\\' || value[1] == '/'));
@@ -517,6 +527,7 @@ static const unsigned char oot_item_kinds[] = {OOT_CHEAT_ITEMS(OOT_NO_SECTION, O
 #define OOT_ITEM_COUNT (sizeof oot_item_names / sizeof oot_item_names[0])
 
 static int oot_item_count(Ctx *c, const char *name);
+static int oot_gamedata_bool(Ctx *c, uint32_t hash, int *value);
 
 static void oot_inventory_refresh(Ctx *c, int64_t now) {
     void rx_option_set(int id, int value);
@@ -524,7 +535,16 @@ static void oot_inventory_refresh(Ctx *c, int64_t now) {
     static int probed;
     if (now < next) return;
     next = now + 500000000LL;
-    for (unsigned i = 0; i < OOT_ITEM_COUNT; i++) rx_option_set(OOT_CHEAT_ITEM_BASE + (int)i, oot_item_count(c, oot_item_names[i]));
+    int loaded = 0;   /* (a save's counts read: the first item's is not -1) */
+    for (unsigned i = 0; i < OOT_ITEM_COUNT; i++) {
+        const int count = oot_item_count(c, oot_item_names[i]);
+        if (!i) loaded = count >= 0;
+        rx_option_set(OOT_CHEAT_ITEM_BASE + (int)i, count);
+    }
+    {   /* Link's age for the Debug tab's Switch age row: 0 child, 1 adult, -1 no save loaded (Sequence_IsChildhood) */
+        int child = 1;
+        rx_option_set(OOT_CHEAT_AGE_ID, loaded && oot_gamedata_bool(c, 0xcea220d3u, &child) ? (child ? 0 : 1) : -1);
+    }
     if (!probed && oot_pouch_count(c, "Item_DekuSeed") >= 0) {
         probed = 1;   /* (one line naming every count, both spellings: which names the pouch knows) */
         static const char *const probes[] = {OOT_CHEAT_ITEM_PROBES};
@@ -1208,6 +1228,7 @@ volatile uint64_t hos_wide_out, hos_wide_scene;
 volatile int hos_native_scene;
 volatile int hos_fix_res;   /* (nx2/oot_native_resolution.py's cached-scale refresh: HOS_FIX_RES=1; #849's fixed-scale patch does it by default) */
 volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
+volatile uint32_t hos_wide_keep_mask = 0xf;   /* (nx2/oot_wide.py KEEP_VTABLES: the screens that keep the whole picture, a bit each; MkwVkHost.wide_menus) */
 /* (nx2/oot_occlusion.py) read by the game's code where it decides to make occlusion queries: 1, none (HOOKSHOT_OCCLUSION_OFF=1) */
 volatile int hos_occlusion_off;
 static void occlusion_switch(void) {

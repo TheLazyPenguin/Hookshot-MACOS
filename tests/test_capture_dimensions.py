@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import zlib
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

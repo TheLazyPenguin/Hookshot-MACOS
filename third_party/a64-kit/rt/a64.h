@@ -172,13 +172,16 @@ A64_INLINE uint64_t a64_i_load_n(uint64_t a, uint32_t size) {
     }
 }
 A64_INLINE int a64_i_cas_n(uint64_t a, uint32_t size, uint64_t expect, uint64_t value) {
-    A64_MARK(a, size);
+    int ok;   /* (marked after a successful store: cas_n in a64_rt.c) */
     switch (size) {
-    case 1: { uint8_t e = (uint8_t)expect; return __atomic_compare_exchange_n((uint8_t *)A64_PTR(a), &e, (uint8_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    case 2: { uint16_t e = (uint16_t)expect; return __atomic_compare_exchange_n((uint16_t *)A64_PTR(a), &e, (uint16_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    case 4: { uint32_t e = (uint32_t)expect; return __atomic_compare_exchange_n((uint32_t *)A64_PTR(a), &e, (uint32_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    default: { uint64_t e = expect; return __atomic_compare_exchange_n((uint64_t *)A64_PTR(a), &e, value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+    case 1: { uint8_t e = (uint8_t)expect; ok = __atomic_compare_exchange_n((uint8_t *)A64_PTR(a), &e, (uint8_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    case 2: { uint16_t e = (uint16_t)expect; ok = __atomic_compare_exchange_n((uint16_t *)A64_PTR(a), &e, (uint16_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    case 4: { uint32_t e = (uint32_t)expect; ok = __atomic_compare_exchange_n((uint32_t *)A64_PTR(a), &e, (uint32_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    default: { uint64_t e = expect; ok = __atomic_compare_exchange_n((uint64_t *)A64_PTR(a), &e, value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
     }
+    if (ok)
+        A64_MARK(a, size);
+    return ok;
 }
 A64_INLINE uint64_t a64_i_ldxr(GuestContext *c, uint64_t addr, uint32_t size) {
     const uint64_t v = a64_i_load_n(addr, size);

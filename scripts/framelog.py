@@ -1,4 +1,6 @@
-"""The flashes in a frame log (RX_VK_FRAMELOG, gpu/vk/vk_replay.cpp): every frame shown, 320x180.
+"""The flashes in a frame log (RX_VK_FRAMELOG, gpu/vk/vk_replay.cpp): capture samples, 320x180.
+
+Timestamps sample command recording before GPU submission.
 
     python -I scripts/framelog.py <file> [out.png]
     python -I scripts/framelog.py <file> --inspect
@@ -94,7 +96,7 @@ def main():
     ts = np.array(info.timestamps, dtype=np.uint64)
     kinds = np.array(info.kinds)
     d = np.diff(ts) / 1e6
-    print("shown apart: median %.1f ms, 99%% %.1f, worst %.1f; made %d of %d; missing %d" % (
+    print("capture samples apart: median %.1f ms, 99%% %.1f, worst %.1f; made %d of %d; missing %d" % (
         np.median(d), np.percentile(d, 99), d.max(), kinds.sum(), n, info.missing))
     frame = lambda i: np.asarray(raw[i * SIZE + 16:(i + 1) * SIZE]).reshape(H, W, 4)[..., :3].astype(np.float32)
     prev = blocks(frame(0))

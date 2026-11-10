@@ -150,7 +150,8 @@
           </Grid>
 
           <Grid Grid.Row="4" Margin="0,12,0,0">
-            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid VerticalAlignment="Center">
               <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition/></Grid.ColumnDefinitions>
               <Border Width="16" Height="16" CornerRadius="8" Background="{StaticResource BrandSoft}" VerticalAlignment="Center">
@@ -171,10 +172,25 @@
                   </Style>
                 </ComboBox.FocusVisualStyle>
               </ComboBox>
-              <!-- (make_game.py's last step, the game's prepare-shaders run: unticked, the game prepares them at its first start) -->
-              <CheckBox x:Name="PrepareTick" Style="{StaticResource Tick}" Content="Prepare shaders now" IsChecked="True" Margin="0,12,0,0"
-                        ToolTip="Prepares the game's shaders at the end of the build, a few minutes (longer on some GPUs). Unticked, the game prepares them at its first start, behind a black window."/>
             </StackPanel>
+            <StackPanel Grid.Column="4">
+              <TextBlock x:Name="MemoryLabel" Style="{StaticResource Label}" Text="BUILD MEMORY (GB)"/>
+              <ComboBox x:Name="MemoryBox" Style="{StaticResource Choice}" IsEditable="False"
+                        AutomationProperties.Name="Build memory" AutomationProperties.LabeledBy="{Binding ElementName=MemoryLabel}"
+                        ToolTip="Automatic leaves free memory to your other programs. A number lets the compilers take that many GB together, even if your other programs need it: close them, or the PC may slow down.">
+                <ComboBox.FocusVisualStyle>
+                  <Style TargetType="Control">
+                    <Setter Property="Template">
+                      <Setter.Value><ControlTemplate><Border BorderBrush="{StaticResource Brand}" BorderThickness="2" CornerRadius="10" Margin="-2"/></ControlTemplate></Setter.Value>
+                    </Setter>
+                  </Style>
+                </ComboBox.FocusVisualStyle>
+              </ComboBox>
+            </StackPanel>
+            <!-- (make_game.py's last step, the game's prepare-shaders run: unticked, the game prepares them at its first start) -->
+            <CheckBox x:Name="PrepareTick" Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="3" Style="{StaticResource Tick}" Content="Prepare shaders now"
+                      IsChecked="True" Margin="0,12,0,0"
+                      ToolTip="Prepares the game's shaders at the end of the build, a few minutes (longer on some GPUs). Unticked, the game prepares them at its first start, behind a black window."/>
           </Grid>
 
           <!-- NVIDIA DLSS: off unless ticked. Ticking it shows NVIDIA's license; the build downloads NVIDIA's SDK under it
@@ -184,6 +200,11 @@
                       Content="NVIDIA DLSS (downloads NVIDIA's SDK under NVIDIA's license)"/>
             <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
                        Text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them."/>
+            <!-- AMD FSR 4: off unless ticked. Nothing is downloaded: AMD's DLLs are put beside the game by hand (the readme) -->
+            <CheckBox x:Name="FsrTick" Style="{StaticResource Tick}" IsChecked="False" Margin="0,10,0,0"
+                      Content="AMD FSR 4 (AMD's files are not included: see the readme)"/>
+            <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
+                       Text="For AMD Radeon graphics cards. It is chosen in the game's Insert menu, as the Upscaler."/>
           </StackPanel>
 
           </Grid>
@@ -231,7 +252,7 @@
 
           <Grid Grid.Row="2">
             <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <ToggleButton x:Name="ShowLog" Style="{StaticResource Link}" VerticalAlignment="Center" Content="Show details"
+            <ToggleButton x:Name="ShowLog" Style="{StaticResource Link}" HorizontalAlignment="Left" VerticalAlignment="Center" Content="Show details"
                           Checked="LogToggled" Unchecked="LogToggled"/>
             <Button x:Name="CancelButton" Grid.Column="1" Style="{StaticResource Quiet}" Content="Cancel" Click="CancelBuild"/>
           </Grid>

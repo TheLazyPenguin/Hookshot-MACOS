@@ -12,6 +12,12 @@ import tempfile
 import unittest
 from unittest import mock
 
+# (Linux only)
+RUN_ALL_SKIP = {
+    "windows": "the save script's folder discovery is the Linux one"
+               " (on Windows Hookshot's saves are in the game folder: --hookshot)",
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("oot_saves", ROOT / "scripts" / "oot_saves.py")
 oot = importlib.util.module_from_spec(spec)

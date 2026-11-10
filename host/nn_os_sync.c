@@ -191,8 +191,15 @@ static Obj *obj_lookup(uint64_t key, int kind);
    of the shared table and a cache miss on a scattered object). Game threads use a few objects over and over: a small
    direct-mapped cache per thread answers those. An entry holds while its object is still that address's and of the
    kind asked for (objects are reused, never freed: spares). HOS_NO_OBJ_CACHE=1: off. */
+static Obj *obj_nockpt(uint64_t key, int kind);
 static Obj *obj(uint64_t key, int kind) {
     hos_vcore_checkpoint();   /* (virtual cores: every nn::os call, where a better waiter takes the core) */
+    return obj_nockpt(key, kind);
+}
+/* obj without the checkpoint, for lookups under a host lock: a checkpoint there can give the core up and wait for one
+   while the lock is held, and a thread that holds a core can then block on that lock (wait_any's scan under mw_lock vs
+   poke_multiwait: a stall until the 250 ms vcore escape) */
+static Obj *obj_nockpt(uint64_t key, int kind) {
     /* (hookshot: 128 still missed: obj_lookup was the busiest leaf in dense Kokiri, 3.2% of all samples, 4.3% of the instants when one
        thread alone ran; each actor has its own mutexes) */
     static _Thread_local struct { uint64_t key; Obj *o; } cache[1024];
@@ -676,6 +683,16 @@ static int event_wait(Obj *e, int64_t timeout_ns, int try_only) {
     return got;
 }
 
+/* event_wait(e, 0, 1) without its spin, sleep and wake-latency note: for WaitAny's scan, which holds mw_lock and
+   may make no scheduling point (vcore checkpoint, yield, sleep) there. Set: taken (cleared when auto-clear) */
+static int event_peek(Obj *e) {
+    AcquireSRWLockExclusive(&e->lk);
+    const int got = e->signaled;
+    if (got && e->autoclear) e->signaled = 0;
+    ReleaseSRWLockExclusive(&e->lk);
+    return got;
+}
+
 /* SignalEvent from host code (any host thread): devices the OS layer emulates, the video decoder for one. */
 void hos_event_signal(uint64_t guest_event) { event_signal(obj(guest_event, K_EVENT)); }
 
@@ -1060,14 +1077,15 @@ static void holder(Ctx *c, int what) {
     h->sem_max = what;   /* the kind of object watched (Obj fields reused: a holder has no semaphore) */
 }
 /* Ready now? Consumes an auto-clear event's signal, as the kernel does when a wait is satisfied by it. */
+/* (under mw_lock: lookups without the vcore checkpoint, obj_nockpt) */
 static int holder_ready(Obj *h) {
     switch (h->sem_max) {
-    case H_EVENT: return event_wait(obj(h->event, K_EVENT), 0, 1);
-    case H_TIMER: { Obj *t = obj(h->event, K_TIMER); return t->due_ns && hos_now_ns() >= t->due_ns; }
+    case H_EVENT: return event_peek(obj_nockpt(h->event, K_EVENT));
+    case H_TIMER: { Obj *t = obj_nockpt(h->event, K_TIMER); return t->due_ns && hos_now_ns() >= t->due_ns; }
     case H_THREAD: return 0;   /* thread exit is not tracked as an object yet */
-    case H_SEMA: { Obj *s = obj(h->event, K_SEMA); return s->sem > 0; }
-    case H_QUEUE_NOT_EMPTY: { Obj *q = obj(h->event, K_QUEUE); return q->qlen > 0; }
-    case H_QUEUE_NOT_FULL: { Obj *q = obj(h->event, K_QUEUE); return q->qlen < q->qcap; }
+    case H_SEMA: { Obj *s = obj_nockpt(h->event, K_SEMA); return s->sem > 0; }
+    case H_QUEUE_NOT_EMPTY: { Obj *q = obj_nockpt(h->event, K_QUEUE); return q->qlen > 0; }
+    case H_QUEUE_NOT_FULL: { Obj *q = obj_nockpt(h->event, K_QUEUE); return q->qlen < q->qcap; }
     default: return 0;         /* native handles: never, without a kernel behind them */
     }
 }
@@ -1126,7 +1144,7 @@ static uint64_t wait_any(uint64_t multiwait, int64_t timeout_ns) {
         for (int i = 0; i < mw->nlinks && !found; i++) {
             if (holder_ready(mw->links[i])) found = mw->links[i]->key;
             else if (mw->links[i]->sem_max == H_TIMER) {
-                const int64_t due = obj(mw->links[i]->event, K_TIMER)->due_ns;
+                const int64_t due = obj_nockpt(mw->links[i]->event, K_TIMER)->due_ns;
                 if (due && due < wake) wake = due;
             }
         }

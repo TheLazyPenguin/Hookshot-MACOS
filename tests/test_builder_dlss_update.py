@@ -5,6 +5,9 @@ import shutil
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--dotnet", "{dotnet}"]
+RUN_ALL_SKIP = {"linux": "Windows Builder update policy; .NET 8 fixture exercised on Windows"}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

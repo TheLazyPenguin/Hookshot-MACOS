@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = r"""
@@ -119,7 +121,7 @@ def check_source(draw):
         raise SystemExit("a cold library is not handed to a worker, or its job carries a flag a waiting draw would run")
     # (after the pipeline is ready, not before: the draw that waits for it runs this job itself, jobs_wait, and would be held
     # for as long as anything put before that takes)
-    job = between(draw, "    jobs_push([job] {\n        // (over a linked one", "}, false, &e->ready);")
+    job = between(draw, "    jobs_push([job] {\n        // (over a linked one", "}, false, &e->ready,")
     if job.index("job->e->ready.store(true") > job.index("gpl_build_cold("):
         raise SystemExit("the cold libraries are handed to the workers before the pipeline the draw waits for is ready")
     replay = (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8")

@@ -41,6 +41,7 @@ typedef void *HANDLE;
 #define OPEN_EXISTING 3
 #define INFINITE 0xffffffff
 #define CP_UTF8 65001
+#define ERROR_FILE_NOT_FOUND 2
 #define ERROR_BROKEN_PIPE 109
 #define WAIT_OBJECT_0 0
 typedef struct { DWORD nLength; void *lpSecurityDescriptor; BOOL bInheritHandle; } SECURITY_ATTRIBUTES;
@@ -156,6 +157,18 @@ static void extract_part(const wchar_t *target, const wchar_t *archive) {
 }
 
 #define CHECK(c, why) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", why); return 1; } } while (0)
+static int check_missing_guidance(void) {
+    CHECK(wcsstr(message, L"Windows' tar.exe was not found") && wcsstr(message, L"Windows error 2"), "identify the missing Windows extractor");
+    const wchar_t *admin = wcsstr(message, L"Command Prompt as administrator");
+    const wchar_t *dism = wcsstr(message, L"DISM /Online /Cleanup-Image /RestoreHealth");
+    const wchar_t *success = wcsstr(message, L"After DISM succeeds");
+    const wchar_t *sfc = wcsstr(message, L"sfc /scannow");
+    const wchar_t *restart = wcsstr(message, L"restart Windows");
+    const wchar_t *retry = wcsstr(message, L"run setup again");
+    CHECK(admin && dism && success && sfc && restart && retry, "complete manual recovery guidance");
+    CHECK(admin < dism && dism < success && success < sfc && sfc < restart && restart < retry, "manual repair success/restart/retry order");
+    return 0;
+}
 #ifdef REAL_CHILD
 int main(int argc, char **argv) {
     wchar_t self[MAX_PATH]; GetModuleFileNameW(NULL, self, MAX_PATH);
@@ -170,9 +183,31 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 20; i++) WriteFile(err, bytes, sizeof bytes, &n, NULL);
         return 23;
     }
-    CHECK(argc == 2, "temporary folder argument");
+    CHECK(argc == 2 || (argc == 3 && !strcmp(argv[2], "missing")), "temporary folder argument");
     CHECK(MultiByteToWideChar(CP_ACP, 0, argv[1], -1, fake_system, MAX_PATH), "temporary path conversion");
     wchar_t child[MAX_PATH]; swprintf(child, MAX_PATH, L"%ls\\tar.exe", fake_system);
+    if (argc == 3) {
+        CHECK(GetFileAttributesW(child) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND, "owned temporary extractor does not exist");
+        DWORD cold, before, after;
+        CHECK(GetProcessHandleCount(GetCurrentProcess(), &cold), "cold native handle count");
+        if (!setjmp(failed)) extract_part(fake_system, L"C:\\authored cache\\part.zip");
+        CHECK(failure_seen && wcslen(message) < 1024, "bounded native launch failure");
+        CHECK(wcsstr(message, fake_system) && wcsstr(message, L"C:\\authored cache\\part.zip"), "native missing failure retains both paths");
+        /* The first process/formatting call can initialize persistent runtime handles. Check repeated failures after it. */
+        CHECK(GetProcessHandleCount(GetCurrentProcess(), &before), "initial native handle count");
+        for (int i = 0; i < 4; i++) {
+            failure_seen = 0;
+            if (!setjmp(failed)) extract_part(fake_system, L"C:\\authored cache\\part.zip");
+            CHECK(failure_seen && wcslen(message) < 1024, "repeated bounded native launch failure");
+            CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) && after == before, "each repeated missing native child closes all capture handles");
+        }
+        CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) && after == before, "repeated missing native children close all capture handles");
+        printf("Native handles: cold=%lu warm=%lu after each of four retries=%lu\n", cold, before, after);
+        CHECK(!check_missing_guidance(), "native missing recovery guidance");
+        CHECK(GetFileAttributesW(child) == INVALID_FILE_ATTRIBUTES, "no extractor or repair command was created");
+        printf("PASS real missing executable, recovery guidance, native handles %lu -> %lu across four retries\n", before, after);
+        return 0;
+    }
     CHECK(CopyFileW(self, child, TRUE), "authored fake tar copy");
     HANDLE saved_in = GetStdHandle(STD_INPUT_HANDLE), saved_out = GetStdHandle(STD_OUTPUT_HANDLE);
     SetStdHandle(STD_INPUT_HANDLE, NULL); SetStdHandle(STD_OUTPUT_HANDLE, NULL);
@@ -196,6 +231,8 @@ int main(int argc, char **argv) {
     state.code = 23;
     strcpy(state.data, "authored tar diagnostic"); state.length = strlen(state.data);
     if (!strcmp(test, "launch")) state.launch_error = 5;
+    else if (!strcmp(test, "missing")) state.launch_error = ERROR_FILE_NOT_FOUND;
+    else if (!strcmp(test, "child_exit_2")) state.code = 2;
     else if (!strcmp(test, "long")) { memset(state.data, 'x', sizeof state.data); memcpy(state.data, "authored tar diagnostic", 23); state.length = sizeof state.data; }
     else if (!strcmp(test, "success")) state.code = 0, state.length = 0;
     else if (!strcmp(test, "warning")) state.code = 0;
@@ -206,10 +243,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(test, "high_exit")) state.code = 0xc0000005UL;
     else if (!strcmp(test, "query")) state.query_error = 6;
     else if (!strcmp(test, "capture_error")) state.pipe_error = 87;
-    else if (!strcmp(test, "max_paths")) {
+    else if (!strcmp(test, "max_paths") || !strcmp(test, "missing_max_paths")) {
         for (int i = 3; i < MAX_PATH - 1; i++) target[i] = L'd', archive[i] = L'a';
         target[MAX_PATH - 1] = archive[MAX_PATH - 1] = 0;
         memset(state.data, 'x', sizeof state.data); memcpy(state.data, "authored tar diagnostic", 23); state.length = sizeof state.data;
+        if (!strcmp(test, "missing_max_paths")) state.launch_error = ERROR_FILE_NOT_FOUND;
     }
     else CHECK(!strcmp(test, "failure"), "known case");
     if (!setjmp(failed)) extract_part(target, archive);
@@ -222,9 +260,14 @@ int main(int argc, char **argv) {
         CHECK(wcsstr(message, target), "actual destination retained");
         CHECK(wcsstr(message, archive), "actual archive retained");
         CHECK(!wcsstr(message, L"space on C:"), "do not invent a full C drive");
-        if (!strcmp(test, "launch")) CHECK(wcsstr(message, L"Could not start") && wcsstr(message, L"Windows error 5"), "launch error is not child exit");
+        if (state.launch_error != ERROR_FILE_NOT_FOUND)
+            CHECK(!wcsstr(message, L"tar.exe was not found") && !wcsstr(message, L"DISM") && !wcsstr(message, L"sfc /scannow"), "other failures do not recommend missing-tool repairs");
+        if (state.launch_error == ERROR_FILE_NOT_FOUND) CHECK(!check_missing_guidance(), "missing recovery guidance");
+        else if (!strcmp(test, "launch")) CHECK(wcsstr(message, L"Could not start") && wcsstr(message, L"Windows error 5"), "launch error is not child exit");
         else if (!strcmp(test, "query")) CHECK(wcsstr(message, L"Could not read") && wcsstr(message, L"Windows error 6"), "unknown exit status is not invented");
         else {
+            if (!strcmp(test, "child_exit_2")) CHECK(wcsstr(message, L"exited with code 2"), "child exit 2 is not a missing executable");
+            else
             CHECK(wcsstr(message, !strcmp(test, "high_exit") ? L"exited with code 3221225477" : L"exited with code 23"), "actual unsigned child exit status");
             if (!strcmp(test, "capture_error")) {
                 CHECK(wcsstr(message, L"Stderr unavailable") && wcsstr(message, L"Windows error 87"), "capture failure label and OS reason");

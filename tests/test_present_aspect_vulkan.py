@@ -11,6 +11,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+# (a GPU)
+RUN_ALL_SKIP = {
+    "linux": "needs a Vulkan 1.3 device for offscreen transfer/readback",
+    "windows": "needs a Vulkan 1.3 device for offscreen transfer/readback",
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

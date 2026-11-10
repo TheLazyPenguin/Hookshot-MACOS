@@ -13,6 +13,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
+# (Linux only)
+RUN_ALL_SKIP = {"windows": "the Linux builder's update and folder launcher, POSIX files and shell scripts"}
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "builder" / "linux"))
 sys.path.insert(0, str(ROOT / "nx2"))
@@ -326,6 +329,80 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(linux_update._read_at_most(io.BytesIO(b"x" * 10), 10), b"x" * 10)
         with self.assertRaises(RuntimeError):
             linux_update._read_at_most(io.BytesIO(b"x" * 11), 10)
+
+    def test_a_download_is_a_get(self):
+        # (Request's second argument is the POST body: v2.0.12's str there failed every download before it connected)
+        from unittest import mock
+        seen = []
+
+        class Answer(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(req, timeout=None):
+            seen.append(req)
+            return Answer(b"list")
+        with mock.patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(linux_update._request("https://example.invalid/list.txt", 5), b"list")
+        self.assertEqual(seen[0].get_method(), "GET")
+        self.assertIsNone(seen[0].data)
+
+    def test_a_link_chain_cannot_leave_the_staging_tree(self):
+        # x/../.. is inside the folder as written, but the system resolves x first: a link made after it (in the same zip
+        # or a later part) put the chain anywhere, and AppRun copied into a link wrote a file outside the install
+        from unittest import mock
+        deep = "a/b/c/d/e/f"
+        chains = (
+            ("climb-after-a-name", [("L", "t/../canary"), ("t", ".")]),
+            ("apprun-through-a-chain", [("AppRun", deep + "/L"), (deep + "/L", "t/../canary"), (deep + "/t", "../" * 6)]),
+        )
+        for label, links in chains:
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="hookshot-chain-") as tmp:
+                home = Path(tmp).resolve() / "home"
+                versions = home / "hookshot" / "builder" / "versions"
+                versions.mkdir(parents=True)
+                canary = versions / "canary"
+                canary.write_bytes(b"canary")
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w") as zipped:
+                    for name, target in links:
+                        zip_link(zipped, name, target)
+                    zipped.writestr("usr/share/hookshot/builder/linux/AppRun", b"#!/bin/sh\necho changed\n")
+                data = archive.getvalue()
+                part = linux_update.Part(linux_update._sha256(data), len(data), ".", "chain-part", None)
+                with mock.patch.dict(os.environ, {"HOOKSHOT_BUILDER_HOME": str(home)}):
+                    with self.assertRaises(ValueError):
+                        linux_update.install(linux_update.Manifest("v2", [part]), None, None, get=lambda url: data)
+                self.assertEqual(canary.read_bytes(), b"canary")
+                self.assertFalse((versions / "v2").exists())
+                self.assertFalse((versions / "v2.part").exists())
+        # (leading .. stays allowed: the toolchain's links are written that way)
+        with tempfile.TemporaryDirectory(prefix="hookshot-chain-ok-") as tmp:
+            dest = Path(tmp) / "stage"
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("lib/real", b"real")
+                zip_link(zipped, "bin/alias", "../lib/real")
+            linux_update._unpack(archive.getvalue(), str(dest), None)
+            self.assertEqual((dest / "bin" / "alias").read_bytes(), b"real")
+
+    def test_unpacked_files_are_not_group_or_world_writable(self):
+        with tempfile.TemporaryDirectory(prefix="hookshot-mode-") as tmp:
+            dest = Path(tmp) / "stage"
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for name, mode in (("tool", 0o777), ("data", 0o666), ("setuid", 0o4755)):
+                    info = zipfile.ZipInfo(name)
+                    info.create_system = 3
+                    info.external_attr = (stat.S_IFREG | mode) << 16
+                    zipped.writestr(info, b"x")
+            linux_update._unpack(archive.getvalue(), str(dest), None)
+            self.assertEqual((dest / "tool").stat().st_mode & 0o7777, 0o755)
+            self.assertEqual((dest / "data").stat().st_mode & 0o7777, 0o644)
+            self.assertEqual((dest / "setuid").stat().st_mode & 0o7777, 0o755)
 
     def test_the_button_matches_the_windows_builder(self):
         self.assertEqual(linux_update.choose_mode("v1", "v2", "v2", False, True), "update-game")

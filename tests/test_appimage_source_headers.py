@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import unittest
 
+# (Linux only)
+RUN_ALL_SKIP = {"windows": "the AppImage source-copy block uses POSIX Bash and cp"}
+
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"\n]+)"', re.MULTILINE)
 

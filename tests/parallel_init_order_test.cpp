@@ -36,6 +36,8 @@ struct VkCommandBuffer_T {
     bool begun = false, ended = false, submitted = false;
 };
 std::vector<VkCommandBuffer_T*> all_cbs, queue;
+std::vector<std::unique_ptr<VkCommandBuffer_T>> owned_cbs;
+std::set<int> published_slots;   // draw-stream CPU writes published before a worker slot reaches the GPU
 std::atomic<int> failures{0};
 #define CHECK(v) do { if (!(v)) { std::printf("FAIL:%d %s\n", __LINE__, #v); std::fflush(stdout); std::_Exit(1); } } while (0)
 
@@ -107,6 +109,8 @@ VkResult vkQueueSubmit2(VkQueue, uint32_t n, const VkSubmitInfo2* si, VkFence) {
         for (uint32_t i = 0; i < si[s].commandBufferInfoCount; i++) {
             VkCommandBuffer cb = si[s].pCommandBufferInfos[i].commandBuffer;
             CHECK(cb && cb->ended && !cb->submitted);
+            if (cb->name.rfind("cmd_", 0) == 0)
+                CHECK(published_slots.count(std::stoi(cb->name.substr(4))) == 1);
             cb->submitted = true;
             queue.push_back(cb);
             if (cb->name == "cmd_0") latch['z'].post();
@@ -115,11 +119,13 @@ VkResult vkQueueSubmit2(VkQueue, uint32_t n, const VkSubmitInfo2* si, VkFence) {
 }
 std::mutex cbs_mu;
 VkCommandBuffer make_cb(const char* what, int k) {
-    auto* cb = new VkCommandBuffer_T;
+    auto cb = std::make_unique<VkCommandBuffer_T>();
     cb->name = std::string(what) + "_" + std::to_string(k);
+    auto* result = cb.get();
     std::lock_guard l(cbs_mu);
-    all_cbs.push_back(cb);
-    return cb;
+    all_cbs.push_back(result);
+    owned_cbs.push_back(std::move(cb));
+    return result;
 }
 // (the init pools' startup: each pool creation and allocation can be made to fail, its output left as garbage)
 const uintptr_t kGarbage = 0xBAD0;
@@ -257,6 +263,7 @@ void record_segment(VkCommandBuffer& cmd, const Segment& g) {
     }
 }
 void draw_begin_recording(int, VkCommandBuffer, uint64_t) {}
+void draw_flush_recording(int slot) { CHECK(slot >= 0 && slot < 8); published_slots.insert(slot); }
 void queue_flush_locked() {}
 void checkpoints_report() {}
 [[noreturn]] void device_lost() { std::_Exit(3); }   // (vk_replay.cpp: the report, then the process ends)
@@ -313,6 +320,7 @@ int recording_count = 0;
 uint64_t rec_cur_value = 1;
 Recording& begin_segment_recording(uint64_t) {
     const int k = recording_count++;
+    published_slots.erase(k);
     Recording& r = recordings[k];
     r.cmd = make_cb("cmd", k), r.upload = make_cb("upload", k);
     [k](auto& x) {   // (the fixed code's own command buffer for its new images)
@@ -488,6 +496,7 @@ int main(int argc, char** argv) {
             if (line.find("FATAL") == std::string::npos) return;
             std::printf("init_end_fail: stopped: queue%s\n", queue_text().c_str());
             if (running) std::printf("  FAIL: the replay stopped with a worker still recording\n");
+            CHECK(published_slots == std::set<int>{0});   // lost init and later slots were not published
             for (auto* cb : queue)
                 for (const Op& o : cb->ops)
                     if (o.image == kTex) std::printf("  FAIL: %s, submitted, uses the texture whose initialization was lost\n", cb->name.c_str());

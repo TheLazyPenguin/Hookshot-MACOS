@@ -74,6 +74,7 @@ def main():
 #include <sys/stat.h>
 #include <unistd.h>
 static DWORD last_error;
+#define HOS_FS_PATH 1024   /* (host/nn_fs.c's path buffers, #1497) */
 static void hos_log(const char *f, ...) { (void)f; }
 static void lower_slash(char *s) { (void)s; }
 static int nput;

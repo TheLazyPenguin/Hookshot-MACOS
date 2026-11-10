@@ -21,7 +21,9 @@
 #include "gpu_choice.h"
 #include "vk_menu.h"
 #include "vk_dlss.h"
+#include "vk_fsr4.h"
 #include "vk_reflex.h"
+#include "vk_antilag.h"
 #include "vk_progress.h"
 
 namespace vkx {
@@ -308,7 +310,10 @@ bool create_device() {
     optional(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, dev.coop_matrix);
     optional(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, dev.swap_mutable);   // (hookshot: the overlays, vk_imgui.cpp)
     dlss_device_extensions(want, exts);   // (hookshot: NVIDIA DLSS's, vk_dlss.cpp)
+    bool fsr_descriptor_buffer = false;   // (hookshot, linux: only with a Vulkan FSR 4 library beside the game, vk_fsr4.cpp)
+    if (fsr4_wants_descriptor_buffer()) optional(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME, fsr_descriptor_buffer);
     reflex_device_extensions(want, exts);   // (hookshot: NVIDIA Reflex's, vk_reflex.cpp)
+    antilag_device_extensions(want, exts);   // (hookshot: AMD Anti-Lag 2's, vk_antilag.cpp)
 
     // the queue: one family for graphics, compute and transfer
     vkGetPhysicalDeviceQueueFamilyProperties(dev.physical, &n, nullptr);
@@ -388,8 +393,12 @@ bool create_device() {
     if (dev.view_2d_of_3d) *tail = &v2d3d, tail = &v2d3d.pNext;
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
     if (dev.coop_matrix) *tail = &coop, tail = &coop.pNext;
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptor_buffer{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT};
+    if (fsr_descriptor_buffer) *tail = &descriptor_buffer, tail = &descriptor_buffer.pNext;
     reflex_device_features(tail);   // (present ids, when NVIDIA Reflex's extensions are there)
+    antilag_device_features(tail);   // (AMD Anti-Lag 2's, when its extension is there)
     vkGetPhysicalDeviceFeatures2(dev.physical, &f);
+    descriptor_buffer.descriptorBufferCaptureReplay = VK_FALSE;
     dev.view_2d_of_3d = dev.view_2d_of_3d && v2d3d.sampler2DViewOf3D;
     coop.cooperativeMatrixRobustBufferAccess = VK_FALSE;
     dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix &&
@@ -444,7 +453,9 @@ bool create_device() {
     {   // (hookshot, after TotK Recomp's vk_caps.c) NVN's programs are written for 32 lanes: the translator is told 32, and the lane
         // shuffles of OoT's networks and the lane masks of its mesh programs depend on it. NVIDIA's GPUs have no other size; AMD's
         // default to 64 where they like, and the networks' output came out as coloured noise (Hookshot issues 10 and 14)
+        VkPhysicalDeviceDriverProperties drv{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceSubgroupSizeControlProperties sc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+        sc.pNext = &drv;
         VkPhysicalDeviceSubgroupProperties sg{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
         sg.pNext = &sc;
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -452,6 +463,9 @@ bool create_device() {
         vkGetPhysicalDeviceProperties2(dev.physical, &p2);
         const bool pin = f13.subgroupSizeControl && sc.minSubgroupSize <= 32 && sc.maxSubgroupSize >= 32 && !getenv("RX_VK_NO_SUBGROUP_PIN");
         dev.sg32_stages = pin ? sc.requiredSubgroupSizeStages : 0;
+        dev.subgroup_size = sg.subgroupSize;
+        dev.subgroup_max = sc.maxSubgroupSize > sg.subgroupSize ? sc.maxSubgroupSize : sg.subgroupSize;
+        dev.driver_id = drv.driverID;
         logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
              (unsigned)dev.sg32_stages);
     }
@@ -461,10 +475,21 @@ bool create_device() {
     }
     mesh.multiviewMeshShader = mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;   // (not used)
     dev.mesh_shader = dev.mesh_shader && mesh.meshShader && mesh.taskShader;
+    // (task and mesh shader counts in pipeline statistics, a feature of their own: RADV has it off on RDNA2, and a query
+    // pool made with those counts all the same can hang the GPU)
+    dev.mesh_queries = dev.mesh_shader && mesh.meshShaderQueries;
     // (hookshot, issue 640) RDNA1 and older GPUs: no mesh shaders, but task and mesh programs run as compute shaders
     // that write their vertices to buffers, drawn through an ordinary graphics pipeline. It needs buffer device addresses.
     dev.mesh_fallback = !dev.mesh_shader && f12.bufferDeviceAddress && !getenv("RX_VK_NO_MESH_FALLBACK");
     if (dev.mesh_fallback) logf("vk: no mesh shaders: task and mesh programs run as compute shaders (issue 640 fallback)");
+    bool task_mesh_fallback = false;
+#ifdef _WIN32
+    // Navi 22 can time out on task + mesh draws in the AMD Windows driver (issue 996).
+    task_mesh_fallback = dev.props.vendorID == 0x1002 && dev.props.deviceID == 0x73df;
+#endif
+    if (const char* e = getenv("RX_VK_TASK_MESH_FALLBACK")) task_mesh_fallback = atoi(e) != 0;
+    dev.task_mesh_fallback = task_mesh_fallback && dev.mesh_shader && f12.bufferDeviceAddress && !getenv("RX_VK_NO_MESH_FALLBACK");
+    if (dev.task_mesh_fallback) logf("vk: task + mesh programs use the compute fallback (RX_VK_TASK_MESH_FALLBACK=0: native)");
     if (robust) logf("vk: robust buffer access %s", robust_ok ? "on" : "not supported");
     f.features.robustBufferAccess = robust_ok ? VK_TRUE : VK_FALSE;   // (off by default: the game's accesses stay in their buffers)
     dev.features = f.features;
@@ -491,6 +516,7 @@ bool create_device() {
     if (dev.buffer_marker) buffer_markers_init();
     coopmat_init();
     reflex_device_created();
+    antilag_device_created();
     if (dev.push_descriptor) {
         VkPhysicalDevicePushDescriptorPropertiesKHR pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -671,6 +697,7 @@ bool create_swapchain(uint32_t width, uint32_t height) {
         dev.swapchain = VK_NULL_HANDLE;
         dev.swap_rendered.clear();
         dev.swap_images.clear();
+        dev.swap_spare = 0;
     }
     if (result != VK_SUCCESS) {
         logf("vk: vkCreateSwapchainKHR failed (VkResult %d, extent %ux%u, format %d, usage %#x, mode %d, images %u)",
@@ -702,6 +729,7 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     dev.swap_format = fmt.format;
     dev.swap_extent = {width, height};
     dev.swap_images = std::move(images);
+    dev.swap_spare = n > caps.minImageCount ? n - caps.minImageCount : 0;
     logf("vk: swapchain %ux%u, %u images, %s", width, height, n,
          mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo");
     swap_views_make(ci.imageUsage, mutable_view ? view_formats[1] : fmt.format);
@@ -817,6 +845,21 @@ void prepare_with_screen() {
             if (finished || paint_stop.load()) break;
             Sleep(33);
         }
+        // (the end: a fade to black over 0.4 s, so the game's first frame comes out of black, not cut in over the screen; none
+        // after a screen of under 1.5 s, a blink, or when the window is not shown (paint_stop: its presents wait))
+        const double shown = std::chrono::duration<double>(clock::now() - t0).count();
+        if (shown >= 1.5 && !paint_stop.load()) {
+            const auto f0 = clock::now();
+            for (;;) {
+                const double f = std::chrono::duration<double>(clock::now() - f0).count() / 0.4;
+                startup_fade_to((float)std::min(f, 1.0));
+                uint32_t w, h;
+                window_size(&w, &h);
+                if (w && h) present_image(nullptr, dev.swap_extent.width, dev.swap_extent.height, nullptr);
+                if (f >= 1 || paint_stop.load()) break;
+                Sleep(8);
+            }
+        }
         SetEvent(painted);
     });
     // (this thread: the window's messages on Windows, until the work is done)
@@ -831,9 +874,10 @@ void prepare_with_screen() {
         if (WaitForSingleObject(prep_ended, 33) == WAIT_OBJECT_0) break;
     }
     worker.join();
-    paint_stop.store(true);
-    if (WaitForSingleObject(painted, 1000) == WAIT_OBJECT_0) painter.join();
-    else {   // (its present waits for the window to be seen: the game's own presents will, too)
+    // (the painter ends by itself once the work is finished, after its fade; it is told to stop only when it has not by then)
+    if (WaitForSingleObject(painted, 1500) == WAIT_OBJECT_0) painter.join();
+    else {
+        paint_stop.store(true);   // (its present waits for the window to be seen: the game's own presents will, too)
         logf("vk: start-up: the window is not being shown; the game starts without waiting for it");
         painter.detach();
     }
@@ -946,7 +990,9 @@ int start(void* hwnd) {
         dev.swap_extent = {1920, 1080};
         dev.swap_format = VK_FORMAT_R8G8B8A8_UNORM;
         logf("vk: no window: presents render offscreen (%ux%u)", dev.swap_extent.width, dev.swap_extent.height);
-        return started_up() ? 1 : 0;
+        if (!started_up()) return 0;
+        pipeline_cache_play();   // (play begins: what is made from now on goes into the play files)
+        return 1;
     }
 #ifdef _WIN32
     VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
@@ -993,6 +1039,7 @@ int start(void* hwnd) {
         logf("vk: renderer startup failed after window and swapchain initialization");
         return 0;
     }
+    pipeline_cache_play();   // (play begins: what is made from now on goes into the play files)
     return 1;
 }
 
@@ -1025,6 +1072,7 @@ __attribute__((visibility("default")))
 #endif
 void mkwvk_close_asked(void) {
     using namespace mkwvk;
+    pipeline_cache_close();   // (in play: the pipelines made since the last save, kept for the next start)
     if (!prep_running.load() || prepare_stopped()) return;
     logf("vk: the window was closed while the shaders were prepared: stopping, what is done is kept");
     prepare_stop();

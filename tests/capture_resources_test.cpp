@@ -86,6 +86,14 @@ void record_made() {
     uint32_t mw = 320, mh = 180;
     /* ACTUAL_RECORDING */
 }
+VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier2(VkCommandBuffer, const VkDependencyInfo* info) {
+    require(info->bufferMemoryBarrierCount == 1, "capture host dependency missing");
+    const auto& b = info->pBufferMemoryBarriers[0];
+    require(b.buffer && live.count(reinterpret_cast<uintptr_t>(b.buffer)) && b.offset == 0 &&
+            b.size == uint64_t(kShotW) * kShotH * 4 && b.dstStageMask == VK_PIPELINE_STAGE_2_HOST_BIT &&
+            b.dstAccessMask == VK_ACCESS_2_HOST_READ_BIT, "host dependency on unmade or incorrect readback");
+    ++commands;
+}
 void cleanup() {
     if (shot_view) vkDestroyImageView(dev.device, shot_view, nullptr);
     shot_view = {};
@@ -138,7 +146,7 @@ int main() {
         calls = 0; fail_at = 0;
         made_src = reinterpret_cast<VkImage>(uintptr_t(0xffff));
         record_made();
-        require(made_src && made_map && commands == 4, "recovered made shot was not recorded");
+        require(made_src && made_map && commands == 5, "recovered made shot copy/host dependency was not recorded");
         destroy_image(made_image, made_image_alloc); destroy_buffer(made_buf, made_buf_alloc);
         made_image = {}; made_buf = {}; made_image_alloc = {}; made_buf_alloc = {}; made_map = {};
     }

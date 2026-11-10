@@ -116,7 +116,7 @@ static unsigned cmap4_glyph(const uint8_t *st, size_t n, unsigned code) {
 /* each Switch button's segment pointed at its pad input's icon; how many */
 static int cmap4_bind(uint8_t *st, size_t n) {
     const unsigned segs = rd16(st + 6) / 2;
-    if (14 + 8 * (size_t)segs > n) return 0;
+    if (14 + 8 * (size_t)segs + 2 > n) return 0;   /* (as cmap4_glyph: the ranges' last entry too) */
     uint8_t *ends = st + 14, *starts = ends + 2 * segs + 2, *deltas = starts + 2 * segs, *ranges = deltas + 2 * segs;
     int done = 0;
     for (int b = 0; b < HOS_SW_N; b++) {
@@ -149,7 +149,7 @@ static int bind_font(uint8_t *otf, size_t n) {
         int nseen = 0, done = 0;
         for (unsigned s = 0; s < subs && 4 + 8 * (size_t)(s + 1) <= len; s++) {
             const uint32_t so = rd32(cmap + 4 + 8 * s + 4);
-            if (so + 14 > len || rd16(cmap + so) != 4) continue;
+            if (so > len || len - so < 14 || rd16(cmap + so) != 4) continue;   /* (so + 14 wrapped past 4 GB) */
             int dup = 0;   /* (platforms 0 and 3 share one subtable) */
             for (int k = 0; k < nseen; k++) dup |= seen[k] == so;
             if (dup) continue;

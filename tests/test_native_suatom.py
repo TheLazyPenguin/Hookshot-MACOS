@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "clang++"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

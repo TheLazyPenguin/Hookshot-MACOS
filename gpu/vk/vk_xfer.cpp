@@ -227,7 +227,7 @@ void copy_b2t(VkCommandBuffer cmd, NvnState& st, const nvn_p_copy_bt& p, bool to
     full_barrier(cmd);
     if (to_image) {
         vkCmdCopyBufferToImage(cmd, span.buffer, s.tex->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-        texture_written(s.tex);
+        texture_written(s.tex, "a buffer-to-texture copy");
     } else {
         vkCmdCopyImageToBuffer(cmd, s.tex->image, VK_IMAGE_LAYOUT_GENERAL, span.buffer, 1, &c);
         const uint64_t guest = host->gpu_guest(p.buf);
@@ -293,7 +293,7 @@ void copy_t2t(VkCommandBuffer cmd, NvnState& st, const nvn_p_copy_tt& p) {
         }
         if (!done) warn(10, "texture copy into or out of a BC3-kept ASTC texture it cannot make: skipped");
         full_barrier(cmd);
-        if (done) texture_written(d.tex);
+        if (done) texture_written(d.tex, "a copy into a BC texture");
         return;
     }
     if (s.tex->samples != VK_SAMPLE_COUNT_1_BIT && d.tex->samples == VK_SAMPLE_COUNT_1_BIT && same_size) {
@@ -315,7 +315,7 @@ void copy_t2t(VkCommandBuffer cmd, NvnState& st, const nvn_p_copy_tt& p) {
                        linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     full_barrier(cmd);
-    texture_written(d.tex);
+    texture_written(d.tex, "a texture-to-texture copy");
 }
 
 void clear_tex(VkCommandBuffer cmd, NvnState& st, const nvn_p_clear_tex& p) {

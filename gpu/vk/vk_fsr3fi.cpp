@@ -236,7 +236,6 @@ constexpr uint32_t kOfBlockSize = 8;    ///< opticalFlowBlockSize, likewise
 constexpr uint32_t kPyramidMips = 13;   ///< the mip UAVs the two inpainting pyramid passes declare
 constexpr uint32_t kScdHistogramWidth = 256 * (3 * 3);   ///< HistogramBins * HistogramsPerDim^2
 constexpr uint32_t kCountersBytes = 16;  ///< two uints, rounded up: COUNTER_SPD and the reset index
-constexpr uint32_t kUniformFrames = 4;   ///< (more than the swapchain's images in flight)
 
 struct Pipeline {
     VkDescriptorSetLayout set = VK_NULL_HANDLE;
@@ -299,13 +298,8 @@ struct State {
     uint32_t ready = 0;                  ///< how many of `made` exist
     uint32_t flow_width[kOfLevels]{}, flow_height[kOfLevels]{};
 
-    // The uniform buffer the four constant blocks are written into, with a set of slots per frame in
-    // flight so writing one frame cannot disturb a frame still being read.
-    VkBuffer uniforms = VK_NULL_HANDLE;
-    VmaAllocation uniforms_memory = nullptr;
-    void* uniforms_mapped = nullptr;
+    // Constant block layout; storage belongs to each recording, not a fixed frame ring.
     VkDeviceSize slot_fi = 0, slot_pyramid = 0, slot_of = 0, slot_of_spd = 0, frame_stride = 0;
-    uint32_t uniform_frame = 0;
 
     uint32_t parity = 0;
     int32_t of_frame_index = 0;
@@ -319,15 +313,17 @@ State g;
 constexpr VkImageSubresourceRange ALL_LEVELS{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS,
                                              0, 1};
 
-/// The Frame generation row at 2x asks for this backend's one made frame; RX_VK_FSR_FG=0 never, =1 over the row. The row
-/// is read every time: a player turning frame generation on mid-game gets it on the next frame, not the next launch.
+/// The made frame of Frame generation at 2x by this backend: RX_VK_FSR_FG=1 (opt-in). Without it the renderer's own blend
+/// makes it, as at 3x and more. FSR 3.1's interpolation has no HUD-less colour here (the game draws its HUD into the same
+/// picture), so it moved the HUD with the scene: smeared HUD, a ghost trail behind Link, a see-through rectangle, at 2x only
+/// (#1635 and seven duplicates, 2026-11-10). RX_VK_FSR_FG=1 asks for it over the row, =0 never.
 uint32_t asked() {
     static const int env = []() {
         const char* e = getenv("RX_VK_FSR_FG");
         return e && *e ? std::max(0, atoi(e)) : -1;
     }();
     if (env >= 0) return env ? 1u : 0u;
-    return opts.framegen == 2 ? 1u : 0u;
+    return 0u;   // (opt-in: the renderer's own blend at 2x, see above)
 }
 
 /// A memory dependency over the whole queue, in the synchronization2 form this renderer loads.
@@ -341,7 +337,7 @@ void memory_barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src_stage, VkAcce
     vkCmdPipelineBarrier2(cmd, &di);
 }
 
-// (images of an earlier size, freed once the presents that may still read them are done: texture_frame_no)
+// Images of an earlier size, released only after their GPU uses complete.
 std::vector<std::pair<uint64_t, Image>> dead;
 
 void destroy_now(Image& t) {
@@ -351,16 +347,16 @@ void destroy_now(Image& t) {
     t = Image{};
 }
 
-/// An image let go: destroyed a few presents on, as work recorded with it may still be in flight
+/// Retain every view and its image until a later submission covers the old recordings.
 void drop_image(Image& t) {
-    if (t.image) dead.push_back({texture_frame_no(), std::move(t)});
+    if (t.image) dead.push_back({vk_retirement_value(), std::move(t)});
     t = Image{};
 }
 
 void free_dead() {
-    const uint64_t now = texture_frame_no();
+    const uint64_t now = vk_timeline_completed();
     for (size_t i = 0; i < dead.size();) {
-        if (now - dead[i].first > 4) {
+        if (dead[i].first && now >= dead[i].first) {
             destroy_now(dead[i].second);
             dead[i] = std::move(dead.back());
             dead.pop_back();
@@ -533,11 +529,9 @@ bool features_supported() {
     return true;
 }
 
-/// The uniform buffer the four constant blocks are written into: host visible and mapped, with a set
-/// of slots per frame in flight. cbOF gets one slot per pyramid level plus one for the passes before
-/// the pyramid, because the flow walks its levels from the top down and each level's dispatches read
-/// a block that names the level they are on.
-bool make_uniforms() {
+/// Aligned constant block offsets; the recording supplies storage for each evaluation.
+/// Optical flow keeps a distinct block per pyramid level, plus the block for passes before the pyramid.
+void make_uniform_layout() {
     const VkDeviceSize align =
         std::max<VkDeviceSize>(dev.props.limits.minUniformBufferOffsetAlignment, 16);
     const auto round_up = [align](VkDeviceSize n) { return (n + align - 1) / align * align; };
@@ -546,8 +540,6 @@ bool make_uniforms() {
     g.slot_of = round_up(sizeof(OfConstants));
     g.slot_of_spd = round_up(sizeof(OfSpdConstants));
     g.frame_stride = g.slot_fi + 2 * g.slot_pyramid + (kOfLevels + 1) * g.slot_of + g.slot_of_spd;
-    return create_buffer(g.frame_stride * kUniformFrames, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true,
-                         g.uniforms, g.uniforms_memory, &g.uniforms_mapped);
 }
 
 /// Records one pass: its descriptors pushed at the binding numbers its GLSL fixes them to, then the
@@ -698,7 +690,8 @@ bool prepare(uint32_t width, uint32_t height, uint32_t render_width, uint32_t re
     if (!g.tried) {
         g.tried = true;
         // (TRANSFER_DST: the counters are zeroed with vkCmdFillBuffer before the first frame)
-        g.ok = make_sampler() && make_uniforms() &&
+        make_uniform_layout();
+        g.ok = make_sampler() &&
                create_buffer(kCountersBytes,
                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                              false, g.counters, g.counters_memory, nullptr);
@@ -800,6 +793,9 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
 
     Image& out = g.made[0];
     if (!out.image) return false;
+
+    const UniformUpload uniforms = uniform_upload(g.frame_stride);
+    if (!uniforms.binding) return false;
 
     // Everything this backend owns starts UNDEFINED and lives in GENERAL from here on, as the rest
     // of this renderer's compute resources do.
@@ -917,10 +913,9 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
     of_spd.work_group_offset[1] = luma_offset[1];
     of_spd.num_work_groups_pyramid = of_spd.num_work_groups;
 
-    // This frame's slots, written through the mapped buffer.
-    const VkDeviceSize base = (VkDeviceSize)(g.uniform_frame % kUniformFrames) * g.frame_stride;
-    g.uniform_frame++;
-    uint8_t* const mapped = (uint8_t*)g.uniforms_mapped + base;
+    // This evaluation owns its constants until its recording has completed.
+    const VkDeviceSize base = uniforms.binding.offset;
+    uint8_t* const mapped = uniforms.mapped;
     const VkDeviceSize at_fi = 0;
     const VkDeviceSize at_game_pyramid = at_fi + g.slot_fi;
     const VkDeviceSize at_frame_pyramid = at_game_pyramid + g.slot_pyramid;
@@ -936,16 +931,16 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
         memcpy(mapped + at_of + (VkDeviceSize)(l + 1) * g.slot_of, &level, sizeof level);
     }
     memcpy(mapped + at_of_spd, &of_spd, sizeof of_spd);
-    flush_mapped(g.uniforms_memory, g.frame_stride * kUniformFrames);
+    flush_mapped_range(uniforms.memory, uniforms.binding.offset, uniforms.binding.size);
 
-    const Resource cb_fi{VK_NULL_HANDLE, g.uniforms, base + at_fi, g.slot_fi};
-    const Resource cb_game_pyramid{VK_NULL_HANDLE, g.uniforms, base + at_game_pyramid,
+    const Resource cb_fi{VK_NULL_HANDLE, uniforms.binding.buffer, base + at_fi, g.slot_fi};
+    const Resource cb_game_pyramid{VK_NULL_HANDLE, uniforms.binding.buffer, base + at_game_pyramid,
                                    g.slot_pyramid};
-    const Resource cb_frame_pyramid{VK_NULL_HANDLE, g.uniforms, base + at_frame_pyramid,
+    const Resource cb_frame_pyramid{VK_NULL_HANDLE, uniforms.binding.buffer, base + at_frame_pyramid,
                                     g.slot_pyramid};
-    const Resource cb_of_spd{VK_NULL_HANDLE, g.uniforms, base + at_of_spd, g.slot_of_spd};
+    const Resource cb_of_spd{VK_NULL_HANDLE, uniforms.binding.buffer, base + at_of_spd, g.slot_of_spd};
     const auto cb_of = [&](uint32_t slot) {
-        return Resource{VK_NULL_HANDLE, g.uniforms, base + at_of + (VkDeviceSize)slot * g.slot_of,
+        return Resource{VK_NULL_HANDLE, uniforms.binding.buffer, base + at_of + (VkDeviceSize)slot * g.slot_of,
                         g.slot_of};
     };
     const Resource counters{VK_NULL_HANDLE, g.counters, 0, kCountersBytes};

@@ -16,12 +16,13 @@ the lessons carried over from MKW: [design.md](design.md).
 
 ## Use
 
-Requirements: Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` (2.1), `zstandard` (and, for the button
-prompts, `nx2/prompt_requirements.txt`'s); a compiler: on Windows llvm-mingw
+Requirements: Python 3 with `pip install -r requirements.txt` (`lz4`, `numpy`, `capstone`, `unicorn` 2.1,
+`zstandard`, and the button-prompt packages); a compiler: on Windows llvm-mingw
 (`HOOKSHOT_MINGW`, or an `llvm-mingw` folder in the clone), else emsdk's clang at `C:\emsdk` (or `EMSDK`) with Visual
-Studio's C++ tools; on Linux clang and lld. For the Vulkan back end, a CPM package cache with the Vulkan and SPIR-V
-headers, VMA and FFmpeg: `RX_CPM`, else `cpm` in the clone, else the old caches in mkw-recomp's `work/eg` or
-`..\Eglantine\.cache\cpm`. [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup) says where each comes from.
+Studio's C++ tools; on Linux clang and lld. For the Vulkan back end: distro Vulkan / SPIR-V / VMA headers under
+`/usr`, or `HOOKSHOT_VULKAN_HEADERS` / `HOOKSHOT_SPIRV_HEADERS` / `HOOKSHOT_VMA_HEADERS`, or a CPM package cache
+(`RX_CPM`, else `cpm` in the clone, else the old caches in mkw-recomp's `work/eg` or `..\Eglantine\.cache\cpm`).
+Without those the standalone build stops. [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup) has the rest.
 
 Run everything with `python -I` from this folder.
 
@@ -80,7 +81,7 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 | `HOS_FULLSCREEN=1` | Starts in fullscreen; the Insert menu's Fullscreen row is then left alone |
 | `HOS_AUDIO=0` | No sound device is opened (the mixer still runs); `scripts/run-vk.ps1` sets it unless `-Sound` |
 | `HOS_LANGUAGE=<code>` | The game's language for this run, a code from `language.txt` |
-| `HOS_OUTPUT_RES=<0..3>`, `HOS_HANDHELD=1`, `HOS_ASPECT=<ratio>` | Over the options file: the output resolution (0 2048x1152, 1 2560x1440, 2 3840x2160, 3 1920x1080), the handheld profile, a picture wider than 16:9 (2.3889 for 3440x1440) |
+| `HOS_OUTPUT_RES=<width>x<height>`, `HOS_HANDHELD=1`, `HOS_ASPECT=<ratio>` | Over the options file: the output resolution (a size, as `output_res`), the handheld profile, a picture wider than 16:9 (2.3889 for 3440x1440) |
 | `HOS_DYNRES=0`, `HOS_REALTIME_STEP=0`, `HOS_TEXT_SPEED=<0..3>` | Over the options file: Resolution 100% (non-zero: Auto), Game speed Per frame (1: Real time), Text speed |
 | `RX_VK_FRAMEGEN=0`, `RX_VK_FRAMEGEN_MULT=<2..8>`, `RX_VK_PACE=0`, `RX_VK_UPSCALE=<0..2>` | No frame generation whatever the menu says; over the options file: its multiplier, frame pacing, the upscaling filter |
 | `RX_VK_DEVICE=<n>` | The graphics card listed as `vk: device <n>` in the log, over the menu's GPU device |
@@ -123,7 +124,7 @@ case-sensitive, and an unknown one is ignored.
 |---|---|
 | `HOS_PROFILE=<seconds>` | Every interval, the busiest threads in the log; it also starts the samplers below |
 | `HOS_SAMPLE=<thread>` + `HOS_SAMPLE_FILE=<file>` | One thread's stacks, sampled every millisecond (needs `HOS_PROFILE`); `python -I scripts/prof.py <file>` reads them |
-| `HOS_SAMPLE_ALL=<file>` | Every game and renderer thread every 2 ms while `<file>.go` exists (needs `HOS_PROFILE`); `scripts/crit.py`, `scripts/vkprof.py` and `scripts/hotlist.py` read it |
+| `HOS_SAMPLE_ALL=<file>` | Every game and renderer thread every 2 ms while `<file>.go` exists (needs `HOS_PROFILE`); `scripts/crit.py`, `scripts/vkprof.py` and `scripts/hotlist.py` read it (on Linux with `RX_MAPS=<game folder>`: they name frames from its `hookshot` and `hookshot_vk.so`) |
 | `HOS_THREAD_TIMES=<seconds>` | Every interval, the threads that used over 5% of a core |
 | `HOS_FPS_LOG` (set), `HOS_PRESENT_TRACE=<csv>` | The game's frame limiter, VRR flags and nominal rate every 300 presents; a CSV line per game present |
 | `RX_VK_FRAME_LOG=<csv>` | A CSV line per present: frame, seconds, frame time in ms |
@@ -143,15 +144,21 @@ case-sensitive, and an unknown one is ignored.
 | `RX_VK_PIPE_SKIP=0` | A draw whose pipeline is not ready waits for it, instead of being left out when its targets hold an earlier frame |
 | `RX_VK_PRECOMPILE=0` or `1` | The shader preparation before the title off or on (on in builds made with `RX_RELEASE=1`, as the builders' are) |
 | `RX_VK_NO_PROGRAM_CACHE` (set) | Neither reads nor writes `hookshot_programs.bin` and the pipeline notes |
+| `RX_VK_UB_WORD_HASH=0` | A/B test: use the old low-address-bit index for cached uniform words (default: mix upper address bits to reduce aligned-buffer collisions) |
 | `RX_VK_MIRROR=0`, `RX_VK_MIRROR_MB=<MB>` | No VRAM mirrors of the game's memory pools (on for discrete cards); their budget |
 | `RX_VK_VRAM_MB=<MB>` | The texture cache's budget (default 70% of what the driver allows, at most 6 GB) |
+| `RX_VK_COMPACT=1`, `RX_VK_COMPACT_PCT=<50..90>`, `RX_VK_COMPACT_MB=<MB>` | VRAM compaction (off by default): the textures that are not render targets in a pool of their own, moved out of sparsely used blocks a few a present so that the blocks go back to the driver, and the texture budget holding the driver's count at that share of what it allows (85); the free space that starts a run (512; 192 while the count is over 90%) |
 | `RX_VK_NO_WRITEBACK` (set) | GPU writes to mirrored pools are not copied back to guest memory (an experiment, for A/B) |
 | `RX_VK_WB_DIFF=0` | Write-backs copy every byte again instead of only what changed against a VRAM shadow (the diff is on by default; v2.0.9 and v2.0.10 had it off, issue 1161) |
-| `RX_VK_DLSS=0/1/2`, `RX_VK_DLSS_PRESET=<letter>`, `RX_VK_DLSS_LOG=1`, `RX_VK_REFLEX`, `RX_VK_REFLEX_LOG=1` | NVIDIA DLSS and Reflex for one run: the readme's NVIDIA DLSS section. `RX_VK_DLSS_TRACE=<frames>` logs one frame's large draws every that many frames, `RX_VK_DLSS_DEBUG=motion` shows the motion vectors, `=alternate` the game's own upscale every other frame |
+| `RX_VK_DLSS=0/1/2`, `RX_VK_DLSS_PRESET=<letter>`, `RX_VK_DLSS_LOG=1`, `RX_VK_REFLEX`, `RX_VK_REFLEX_LOG=1`, `RX_VK_ANTILAG=0/1` | NVIDIA DLSS and Reflex, and AMD Anti-Lag 2, for one run (`=-` on Reflex or Anti-Lag 2: its extensions not even enabled): the readme's NVIDIA DLSS section. `RX_VK_DLSS_TRACE=<frames>` logs one frame's large draws every that many frames, `RX_VK_DLSS_DEBUG=motion` shows the motion vectors, `=alternate` the game's own upscale every other frame |
+| `RX_VK_FSR4=0/1/2`, `RX_VK_FSR_DIR=<folder>` | AMD FSR 4 for one run (0 never, 1 FSR 4, 2 its Native AA), and another folder for AMD's DLLs (not from `hookshot_env.txt`): the readme's AMD FSR 4 section. `RX_VK_FSR4=1/2` and `RX_VK_DLSS=1/2` go over the Upscaler row, a saved FSR 3.1 too where the engine they ask for runs; `RX_VK_FSR=1` goes over them (one upscaler at a time). The DLSS trace and debug switches above apply to FSR 4 too, on the frame chain they share |
 | `RX_VK_ASYNC=1` | The replay on a thread of its own instead of the game's submitting thread |
 | `HOS_VCORES=0`, `HOS_CORES=<1..8>`, `HOS_RESERVE_CORE=0` | No virtual cores; the cores the game sees (6); no core kept for the replay (one is, with 8 or more logical processors) |
 
 ### Building
+
+A build reads and writes tens of gigabytes. When the game folder or the build files folder is on a hard drive,
+`make_game.py` warns that an SSD is much faster and builds anyway (the builders ask before they start).
 
 | Switch | What it does |
 |---|---|
@@ -167,11 +174,42 @@ case-sensitive, and an unknown one is ignored.
 | `RX_VK_ONLY=1` | Only the Vulkan back end, with no lift |
 | `OOT_WORK`, `OOT_DUMP`, `OOT_EXEFS`, `OOT_ROMFS` | The work folder and the dump's folders, over `work/dump.txt` |
 
+## The pipeline state list
+
+`assets/pipeline_states.bin.xz` is the list of pipelines every release ships, xz-compressed (about 56 KB for 4276
+pipelines) so that the repository's history stays small. Each record is a pipeline the game asked for: its shaders'
+hashes, the program variant's hash, and the target formats, vertex formats and draw state it was made with
+(`nx2/pipeline_states.py` has the layout). It holds no game code: a player's build turns the hashes back into shaders from
+their own `hookshot_shaders.bin`. `nx2/make_game.py` unpacks it beside the game as `hookshot_pipeline_states_shipped.bin`,
+and the first start's shader preparation builds those pipelines before the title. Without it a new install builds them in
+play, and draws left out while they compile wash the first field load white for seconds (v2.0.8 to v2.0.14 shipped none).
+`assets/pipeline_states.md`, beside it, records where its pipelines came from; note each merge there.
+
+Every release carries it: the AppImage with `assets/` (`scripts/linux/appimage.sh` stops without it, and
+`scripts/linux/check_player_build.sh` reads it back with the image's Python), and the Windows builder's `tools/assets`
+(`scripts/release_parts.py package` stops when it is missing or does not read). xz rather than zstd: the AppImage's
+Python is 3.12, whose standard library has `lzma` but not `compression.zstd`.
+
+A game run writes `hookshot_pipeline_states.bin` beside the executable, adding each pipeline it makes. To refresh the
+shipped list, play through on a build of the current source (the more of the game, the fuller the list) and merge that
+file into the current list, each pipeline once (an `--out` ending in `.xz` is written compressed):
+
+```sh
+python -I nx2/pipeline_states.py --out assets/pipeline_states.bin.xz assets/pipeline_states.bin.xz <game folder>/hookshot_pipeline_states.bin ...
+python -I nx2/pipeline_states.py --check assets/pipeline_states.bin.xz    # what it holds, as the release checks read it
+```
+
+Do it before each release, and after a change to the shaders' translation or to the state a pipeline is made from: a
+record that no longer matches what play asks for builds a pipeline nothing uses, and the one play wants compiles in play.
+When the record's format changes (its magic and record size, `MAGIC` and `SIZE` in `nx2/pipeline_states.py`), the old
+list no longer reads and the release checks stop: make a new one with the new build, without the old list among its
+inputs.
+
 ## The options file
 
 `hookshot_options.ini`, in the game folder, holds the Insert menu's rows as `<key>=<number>`: the row's name in lower
 case with `_` for spaces (`frame_generation=2`, `invert_camera_x=1`), except Output resolution, which is `output_res`.
-`gpu/vk/vk_menu.cpp` writes the whole file at every change (`save`), with `options_version=3`,
+`gpu/vk/vk_menu.cpp` writes the whole file at every change (`save`), with `options_version=4`,
 `microphone_device=<name>` when a microphone is chosen by name, and the controls (`pad_<button>` and `key_<button>`:
 the README's [Controls](../readme.md#controls)). A value outside a row's range is clamped when it is read. Where the
 number is not the obvious one:
@@ -182,7 +220,7 @@ number is not the obvious one:
 | `gpu_device` | 0 Auto, n the n-th card with Vulkan 1.3 as the row lists them |
 | `frame_generation` | 0 Off, 2 to 8 the multiplier |
 | `resolution` | 0 Auto, 1 100%, 2 75%, 3 67%, 4 50% |
-| `output_res` | 0 2048x1152, 1 2560x1440, 2 3840x2160, 3 1920x1080 |
+| `output_res` | A size, `<width>x<height>`: 2048x1152 (the game's own), 1920x1080, 2560x1440, 3840x2160, 5120x1440, 5120x2880, or any other with each side a multiple of 8 (rounded down), at least 640x360, at most 5120x2880's pixels, 5:4 to 32:9; anything else is the game's own. The numbers saved before (0 2048x1152, 1 2560x1440, 2 3840x2160, 3 1920x1080, 4 5120x1440, 5 5120x2880) are still read |
 | `upscaling` | 0 Off, 1 Catmull-Rom, 2 Lanczos |
 | `sharpness`, `rumble_strength`, `motion_sensitivity_x`, `motion_sensitivity_y` | percent |
 | `mouse_sensitivity` | hundredths: 100 is 1.00 |

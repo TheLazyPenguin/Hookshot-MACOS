@@ -42,7 +42,7 @@ def fixed_scale(t):
     t = t.replace(APPLY_OLD, APPLY_NEW, 1).replace(FLAGS_OLD, FLAGS_NEW, 1)
     return t.replace('#include "a64.h"\n', '#include "a64.h"\n' + DECL2, 1), 1
 
-TEXT_DECL = "extern volatile float hos_text_scale;\n"
+TEXT_DECL = "extern volatile float hos_text_scale;\nextern void hos_oot_text_pane(Ctx *c, uint64_t anim);\n"
 LIFE_BUILD_ID = "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348"
 LIFE_HEAD = "void f_804bd8c0(Ctx *__restrict A64_NOESC c) {\n"
 MOVE_HEAD = "void f_82c415e0(Ctx *__restrict A64_NOESC c) {\n"
@@ -141,6 +141,68 @@ def patch_mouse_camera(source):
     source = source[:at] + "    hos_mouse_camera(c->x[0]);   /* (nx2/oot_patches.py: native mouse look) */\n" + source[at:]
     return source.replace('#include "a64.h"\n', '#include "a64.h"\nextern void hos_mouse_camera(uint64_t camera);\n', 1)
 
+
+# The camera's state-3 yaw follow: after f_80642c80's authored heading override (the branch to 0x806492c4), the block at
+# 0x8064720c derives a heading from Link's movement and eases yaw (+0x1a4) through f_80642410 at 0x806475e4. Skip only
+# the movement path, restoring x25's parameter base as that path does, and join the other yaw paths at 0x80645ad8.
+# State 4's stick, state 2's explicit recenter and authored heading overrides stay intact; pitch and collision follow.
+CAM_FOLLOW_ANCHOR = "L_8064720c:;\nif (!c->z) { goto L_806492c4; }\n"
+CAM_FOLLOW_JOIN = "L_80645ad8:;"
+CAM_FOLLOW_HOOK = ("    if (hos_disable_camera_centering()) { c->x[25] = c->x[26]; goto L_80645ad8; }"
+                   "   /* (nx2/oot_patches.py: disable camera centering) */\n")
+
+
+def patch_camera_centering(source):
+    start = source.find(CAM_HEAD)
+    if start < 0:
+        return None
+    end = source.find("\n}", start)
+    if end < 0:
+        return None
+    body = source[start:end]
+    if body.count(CAM_FOLLOW_ANCHOR) != 1 or body.count(CAM_FOLLOW_JOIN) != 1:
+        return None
+    if CAM_FOLLOW_HOOK in body:
+        return source
+    body = body.replace(CAM_FOLLOW_ANCHOR, CAM_FOLLOW_ANCHOR + CAM_FOLLOW_HOOK, 1)
+    return (source[:start] + body + source[end:]).replace(
+        '#include "a64.h"\n', '#include "a64.h"\nextern int hos_disable_camera_centering(void);\n', 1)
+
+
+MENU_FOCUS_HEAD = "void f_802ed660(Ctx *__restrict A64_NOESC c) {\n"
+
+
+def patch_menu_focus(source):
+    """f_802ed660, a menu screen's handler of a pane getting the focus (host/oot_menu.c), calls
+    hos_oot_menu_focus first, with the screen, the pane and its caller's return address"""
+    start = source.find(MENU_FOCUS_HEAD)
+    if start < 0:
+        return None
+    if "hos_oot_menu_focus(c," in source:   # (made before: a lift patched again)
+        return source
+    at = start + len(MENU_FOCUS_HEAD)
+    hook = "    hos_oot_menu_focus(c, c->x[0], c->x[1], c->x[30]);   /* (nx2/oot_patches.py: the menus' focus) */\n"
+    return (source[:at] + hook + source[at:]).replace(
+        '#include "a64.h"\n', '#include "a64.h"\nextern void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr);\n', 1)
+
+
+MENU_TICK_HEAD = "void f_802f1380(Ctx *__restrict A64_NOESC c) {\n"
+
+
+def patch_menu_tick(source):
+    """f_802f1380, a menu screen's update (each frame, before the screen's UI controller: +56, its vtable's
+    +16), calls hos_oot_menu_tick first with the screen: the game's menus' mouse (host/oot_menu.c)"""
+    start = source.find(MENU_TICK_HEAD)
+    if start < 0:
+        return None
+    if "hos_oot_menu_tick(c," in source:   # (made before: a lift patched again)
+        return source
+    at = start + len(MENU_TICK_HEAD)
+    hook = "    hos_oot_menu_tick(c, c->x[0]);   /* (nx2/oot_patches.py: the menus' mouse) */\n"
+    return (source[:at] + hook + source[at:]).replace(
+        '#include "a64.h"\n', '#include "a64.h"\nextern void hos_oot_menu_tick(Ctx *c, uint64_t screen);\n', 1)
+
+
 TEXT_HEAD = "void f_80b1e140(Ctx *__restrict A64_NOESC c) {"
 # (the letters' block: past the early returns, the auto-advance timer and the hidden / no-text checks; reached once a call)
 TEXT_OLD = ("L_80b1e1b4:;\n"
@@ -149,7 +211,8 @@ TEXT_OLD = ("L_80b1e1b4:;\n"
 # (the same block in a build with interrupt polls: nx2/poll.py puts the poll before each backward goto, as a block)
 TEXT_OLD_POLLED = TEXT_OLD.replace("{ goto L_80b1e18c; }", "{ { A64_POLL(c); goto L_80b1e18c; } }")
 TEXT_ADD = ("    if (hos_text_scale != 1.0f) { float _t; uint32_t _u; memcpy(&_t,c->vreg[0],4); _t *= hos_text_scale; "
-            "memcpy(&_u,&_t,4); a64_vset64(c->vreg[0],_u); }   /* (nx2/oot_patches.py: text speed) */\n")
+            "memcpy(&_u,&_t,4); a64_vset64(c->vreg[0],_u); }   /* (nx2/oot_patches.py: text speed) */\n"
+            "    hos_oot_text_pane(c, c->x[19]);   /* (nx2/oot_patches.py: text size; x19 the LetterAnimControl) */\n")
 TEXT_NEW = TEXT_OLD + TEXT_ADD
 
 
@@ -163,8 +226,86 @@ def patch_dynres(s):
     return s.replace('#include "a64.h"\n', '#include "a64.h"\n' + DECL, 1)
 
 
+# The frame's real time in place of the nominal rate, for a Frame rate cap above 60 (host/nn_vi.c hos_frame_seconds_bits; 0, as
+# at a cap of 60: the game's own divide, nothing changes). The engine has two places where its integer nominal rate (+0x2c8 of
+# the graphics module) becomes a time step, both a float divide "base / nominal":
+# - f_80706be0: the frame's step, base 60.0 (30.0 in the half-rate mode), added to the game clock (the double at
+#   [x19+0xd58], in 1/60 s) and handed on as the frame's seconds;
+# - f_83b6ea90: the global step (60.0 / nominal, a float in .data) the rest of the engine reads.
+# The engine's own rate is 60 / <whole display intervals>, never above 60, and its controller puts 60 back over a higher value
+# written from outside before either divide runs: above 60 fps every frame still stepped 1/60 s and the game ran fps / 60 times
+# too fast. With the host's measured frame time the step is base * seconds, whatever the rate. hos_step_probe: f_80706be0's
+# x19, which tells the host the hook is in this build and gives it the game clock for its log (HOS_FPS_LOG=1).
+STEP_SITES = (("void f_80706be0(Ctx *__restrict A64_NOESC c) {\n", 8, "\n    hos_step_probe = c->x[19];"),
+              ("void f_83b6ea90(Ctx *__restrict A64_NOESC c) {\n", 0, ""))
+STEP_OLD = "    _v=a64_fpx_div32_div32(c,_a,_b);\n    a64_vset64(c->vreg[%d],_v);}"
+STEP_HOOK = ("    _v=a64_fpx_div32_div32(c,_a,_b);\n"
+             "    { const uint32_t _hs = hos_frame_seconds_bits; if (_hs) { float _base, _secs; uint32_t _w; memcpy(&_base,&_a,4); "
+             "memcpy(&_secs,&_hs,4); _base *= _secs; memcpy(&_w,&_base,4); _v = _w; } }   /* (base * the frame's seconds: nx2/oot_patches.py) */\n"
+             "    a64_vset64(c->vreg[%d],_v);}")
+STEP_MARK = "hos_frame_seconds_bits; if (_hs)"   # (once per divide with the hook)
+STEP_DECL = "extern volatile uint32_t hos_frame_seconds_bits;\nextern volatile uint64_t hos_step_probe;\n"
+
+
+def patch_frame_seconds(s):
+    """The host's frame time at the step divides of f_80706be0 and f_83b6ea90: (s, the sites patched here). A site whose
+    function is not in the file, is patched already, or whose code differs (another game version) is left as it is."""
+    done = 0
+    for head_text, reg, extra in STEP_SITES:
+        head = s.find(head_text)
+        if head < 0:
+            continue
+        end = s.find("\nvoid f_", head + len(head_text))
+        body = s[head:end if end >= 0 else len(s)]
+        old, new = STEP_OLD % reg, STEP_HOOK % reg + extra
+        if new in body or body.count(old) != 1 or body.count("a64_fpx_div32_div32") != 1:
+            continue
+        at = head + body.index(old)
+        s = s[:at] + new + s[at + len(old):]
+        done += 1
+    if done and STEP_DECL not in s:
+        s = s.replace('#include "a64.h"\n', '#include "a64.h"\n' + STEP_DECL, 1)
+    return s, done
+
+
+def unpatch_frame_seconds(s):
+    """s without the hook, as the lift wrote it: for a lift where only one of the two divides was found (apply)"""
+    for _, reg, extra in STEP_SITES:
+        s = s.replace(STEP_HOOK % reg + extra, STEP_OLD % reg)
+    return s if STEP_MARK in s else s.replace(STEP_DECL, "", 1)   # (a hook of another shape stays, with its declarations)
+
+
+# A movie's frame count above a 60 cap. The game's movie player counts its updates while a movie plays (f_83b7c710: one more
+# at +760 of the player each frame), and a cutscene that shows a movie takes that count as its timeline's frame (f_83b5ec10,
+# f_83b5e9a0): the narration, the rumble and the cutscene's end are placed by it. The movie itself follows the clock, so above
+# 60 fps those cues ran ahead of the picture, fps / 60 times too fast (issue 1742). The count now grows by the frames' time, as
+# the game's clock does (hos_movie_frames, host/nn_vi.c: 1 as before while the host gives no frame time).
+MOVIE_HEAD = "void f_83b7c710(Ctx *__restrict A64_NOESC c) {\n"
+# (the load and the add alone: the store after them is rewritten by the page marks' pass, which runs after these edits)
+MOVIE_OLD = ("    c->x[8]=recomp_load32(c,c->x[20] + 760);\n"
+             "    { uint64_t _a=c->x[8], _b=1ULL; uint64_t _r=_a+_b; _r&=0xFFFFFFFFULL; c->x[8]=_r; }\n")
+MOVIE_NEW = MOVIE_OLD.replace("_b=1ULL", "_b=hos_movie_frames(c->x[20])")
+MOVIE_DECL = "uint32_t hos_movie_frames(uint64_t player);\n"
+
+
+def patch_movie_frames(s):
+    """The movie player's count by the frames' time; None when the file has no such function, s unchanged when the function is
+    there but its code differs (another game version) or has the patch already."""
+    head = s.find(MOVIE_HEAD)
+    if head < 0:
+        return None
+    end = s.find("\nvoid f_", head + len(MOVIE_HEAD))
+    body = s[head:end if end >= 0 else len(s)]
+    if body.count(MOVIE_OLD) != 1:
+        return s
+    at = head + body.index(MOVIE_OLD)
+    s = s[:at] + MOVIE_NEW + s[at + len(MOVIE_OLD):]
+    return s if MOVIE_DECL in s else s.replace('#include "a64.h"\n', '#include "a64.h"\n' + MOVIE_DECL, 1)
+
+
 def patch_text_speed(s):
-    """The scale at the head of the letters' block of f_80b1e140; None when the file has no such function, s unchanged when the
+    """The scale at the head of the letters' block of f_80b1e140 (Text speed), and the call to hos_oot_text_pane after it
+    (Text size: host/oot_text_size.c); None when the file has no such function, s unchanged when the
     function is there but its code differs (another game version)."""
     head = s.find(TEXT_HEAD)
     if head < 0:
@@ -190,14 +331,18 @@ def apply(gen, *, protect_hearts=False, required=False):
     The other patches only warn when their place is not found once."""
     import oot_native_resolution   # (HOS_SCENE_NATIVE=1: the scene's base scale 1.0; off by default since #849's output resolution)
     oot_native_resolution.apply(gen)
-    done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0}
-    if protect_hearts:
+    done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0, "movie's frame count": 0}
+    if protect_hearts:   # (the supported build's: these places are its functions)
+        done["menu focus hook"] = 0
+        done["menu tick hook"] = 0
         done["player heart protection"] = 0
         done["player flight"] = 0
         done["player flight rotation"] = 0
         done["free camera"] = 0
         done["mouse camera"] = 0
-    for path in sorted(glob.glob(os.path.join(gen, "code_*.c"))):
+        done["disable camera centering"] = 0
+    step_sites, step_files = 0, []   # (the divides with the hook, and the files that have it)
+    for path in sorted(glob.glob(os.path.join(glob.escape(gen), "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
             s = f.read()
         out = s
@@ -210,7 +355,24 @@ def apply(gen, *, protect_hearts=False, required=False):
         if t is not None and t != out:
             out = t
             done["text speed block"] += 1
-            print("oot_patches: text speed scale in", os.path.basename(path))
+            print("oot_patches: text speed scale and text size in", os.path.basename(path))
+        focus = patch_menu_focus(out) if protect_hearts else None
+        if focus is not None:
+            out = focus
+            done["menu focus hook"] += 1
+            print("oot_patches: the menus' focus hook in", os.path.basename(path))
+        tick = patch_menu_tick(out) if protect_hearts else None
+        if tick is not None:
+            out = tick
+            done["menu tick hook"] += 1
+            print("oot_patches: the menus' update hook in", os.path.basename(path))
+        movie = patch_movie_frames(out)
+        if movie is not None:
+            if MOVIE_NEW in movie:   # (made now, or by an earlier run over this file)
+                done["movie's frame count"] += 1
+            if movie != out:
+                print("oot_patches: the movie's frame count by the frames' time in", os.path.basename(path))
+            out = movie
         out, n = fixed_scale(out)
         if n:
             done["fixed path's scale"] += 1
@@ -235,16 +397,36 @@ def apply(gen, *, protect_hearts=False, required=False):
             out = mouse
             done["mouse camera"] += 1
             print("oot_patches: native mouse camera in", os.path.basename(path))
+        center = patch_camera_centering(out) if protect_hearts else None
+        if center is not None:
+            out = center
+            done["disable camera centering"] += 1
+            print("oot_patches: disable camera centering switch in", os.path.basename(path))
         view = patch_view(out) if protect_hearts else None
         if view is not None:
             out = view
             done["free camera"] += 1
             print("oot_patches: free camera in", os.path.basename(path))
+        out, sites = patch_frame_seconds(out)
+        if STEP_MARK in out:   # (made now, or by an earlier run over this file)
+            step_sites += out.count(STEP_MARK)
+            step_files.append(path)
+        if sites:
+            print("oot_patches: the frame's time at %d step divide(s) in %s" % (sites, os.path.basename(path)))
         if out != s:
             whole_write.write_whole(path, out, newline="")
     for what, n in done.items():
         if n != 1:
             print("oot_patches: WARNING: the %s was found %d times" % (what, n))
+    if step_sites != len(STEP_SITES):
+        # (both or neither: with one divide timed and the other stepping 1/60 s the two clocks of the game would run apart. Without
+        # the hook the host keeps the rate up to the cap, as before: host/nn_vi.c, hos_step_probe)
+        for path in step_files:
+            with open(path, encoding="utf-8", newline="") as f:
+                s = f.read()
+            whole_write.write_whole(path, unpatch_frame_seconds(s), newline="")
+        print("oot_patches: WARNING: the frame's time was found at %d of %d step divides, none patched (a Frame rate cap above 60 "
+              "keeps the game's own step)" % (step_sites, len(STEP_SITES)))
     apply_output_size(gen, required=required)
 
 
@@ -268,14 +450,14 @@ OUT_EDITS = [
      "    { uint64_t _r = ((uint64_t)0 | ((c->x[1]) << 0)); c->x[20] = _r; }\n",
      "    { uint64_t _a=c->x[0], _b=724ULL; uint64_t _r=_a+_b; c->x[21]=_r; }\n"
      "    { uint64_t _r = ((uint64_t)0 | ((c->x[1]) << 0)); c->x[20] = _r; }\n"
-     "    if (hos_output_size(0) != 2560 && recomp_load32(c, c->x[20] + 8) == 2560) { recomp_store32(c, c->x[20] + 8, hos_output_size(0)); recomp_store32(c, c->x[20] + 12, hos_output_size(1)); }\n"),
+     "    if ((hos_output_size(0) != 2560 || hos_output_size(1) != 1440) && recomp_load32(c, c->x[20] + 8) == 2560) { recomp_store32(c, c->x[20] + 8, hos_output_size(0)); recomp_store32(c, c->x[20] + 12, hos_output_size(1)); }\n"),
     # - f_80ea2f30: the 3D's largest size, ResolutionParam's BaseResolution (or 1920 x 1080 as constants), 3/4 of 2560 x 1440;
     #   above it the game takes a smaller upscale network (1/3: 1280 x 720 at 4K). Scaled with the output.
     ("c->x[30] = 0x80ea2ffcULL; f_831cca50(c);\n"
      "    { uint64_t _b=c->x[0]; int64_t _o=0; { uint64_t _p0,_p1; recomp_ldp32(c,(_b+_o),&_p0,&_p1); c->x[24]=_p0; c->x[25]=_p1; } }\n",
      "c->x[30] = 0x80ea2ffcULL; f_831cca50(c);\n"
      "    { uint64_t _b=c->x[0]; int64_t _o=0; { uint64_t _p0,_p1; recomp_ldp32(c,(_b+_o),&_p0,&_p1); c->x[24]=_p0; c->x[25]=_p1; } }\n"
-     "    if (hos_output_size(0) != 2560) { c->x[24] = (uint32_t)c->x[24] * hos_output_size(0) / 2560; c->x[25] = (uint32_t)c->x[25] * hos_output_size(1) / 1440; }\n"),
+     "    if (hos_output_size(0) != 2560 || hos_output_size(1) != 1440) { c->x[24] = (uint32_t)c->x[24] * hos_output_size(0) / 2560; c->x[25] = (uint32_t)c->x[25] * hos_output_size(1) / 1440; }\n"),
     ("    c->x[8] = 0x44f00000ULL;\n    c->x[8] &= 0xFFFFFFFFULL;\n    recomp_store32(c,c->x[19] + 3668,c->x[8]);\n"
      "    c->x[8] = 0x44870000ULL;\n    c->x[8] &= 0xFFFFFFFFULL;\n",
      "    c->x[8] = hos_output_size(0) * 3 / 4;\n    { float _f = (float)c->x[8]; uint32_t _u; memcpy(&_u, &_f, 4); c->x[8] = _u; }\n"
@@ -313,7 +495,7 @@ def apply_output_size(gen, required=False):
     one the Insert menu's Output resolution is ignored, or a 4K output runs out of the render targets' pool. Elsewhere (another
     build, part of a lift, by hand) a warning"""
     found = [0] * len(OUT_EDITS)
-    for path in sorted(glob.glob(os.path.join(gen, "code_*.c"))):
+    for path in sorted(glob.glob(os.path.join(glob.escape(gen), "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
             s = f.read()
         hit = False

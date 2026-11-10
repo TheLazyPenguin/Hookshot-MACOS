@@ -12,6 +12,72 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+/* (hookshot, #1468) A game folder whose deepest file passes 260 characters (MAX_PATH: "E:\Games\...\romfs\Event\EventSetting\
+   Ev..." at 262) is read too. The host paths here are up to HOS_FS_PATH bytes, and on Windows each file call goes through
+   its wide function: the path converted from the game's UTF-8 strings and, when it is
+   long and absolute, given the extended-length prefix \\?\ (with its / made \), which Windows takes without its long-paths
+   setting. Short paths are as they were. */
+#define HOS_FS_PATH 1024
+#ifdef _WIN32
+static const wchar_t *fs_wide(const char *p, wchar_t *w, size_t cap) {
+    const size_t n = strlen(p);
+    const int already = p[0] == '\\' && p[1] == '\\' && p[2] == '?';
+    const int unc = !already && p[0] == '\\' && p[1] == '\\';
+    const int drive = p[0] && p[1] == ':' && (p[2] == '\\' || p[2] == '/');
+    const int extended = !already && n >= 240 && (drive || unc);
+    size_t at = 0;
+    if (extended) {
+        wcscpy(w, unc ? L"\\\\?\\UNC" : L"\\\\?\\");
+        at = wcslen(w);
+        if (unc) p++;   /* (\\server\share -> \\?\UNC\server\share) */
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, p, -1, w + at, (int)(cap - at)) <= 0) w[0] = 0;
+    if (extended)
+        for (wchar_t *q = w; *q; q++)
+            if (*q == L'/') *q = L'\\';
+    return w;
+}
+#define FS_W(p) fs_wide((p), (wchar_t[HOS_FS_PATH + 8]){0}, HOS_FS_PATH + 8)
+static void fs_find_data(const WIN32_FIND_DATAW *w, WIN32_FIND_DATAA *a) {
+    a->dwFileAttributes = w->dwFileAttributes;
+    a->ftCreationTime = w->ftCreationTime, a->ftLastAccessTime = w->ftLastAccessTime, a->ftLastWriteTime = w->ftLastWriteTime;
+    a->nFileSizeHigh = w->nFileSizeHigh, a->nFileSizeLow = w->nFileSizeLow;
+    a->dwReserved0 = w->dwReserved0, a->dwReserved1 = w->dwReserved1;
+    if (WideCharToMultiByte(CP_UTF8, 0, w->cFileName, -1, a->cFileName, (int)sizeof a->cFileName, NULL, NULL) <= 0) a->cFileName[0] = 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, w->cAlternateFileName, -1, a->cAlternateFileName, (int)sizeof a->cAlternateFileName, NULL,
+                            NULL) <= 0)
+        a->cAlternateFileName[0] = 0;
+}
+static HANDLE fs_CreateFile(const char *p, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD how, DWORD flags, HANDLE t) {
+    return CreateFileW(FS_W(p), access, share, sa, how, flags, t);
+}
+static DWORD fs_GetFileAttributes(const char *p) { return GetFileAttributesW(FS_W(p)); }
+static BOOL fs_CreateDirectory(const char *p, LPSECURITY_ATTRIBUTES sa) { return CreateDirectoryW(FS_W(p), sa); }
+static BOOL fs_DeleteFile(const char *p) { return DeleteFileW(FS_W(p)); }
+static BOOL fs_RemoveDirectory(const char *p) { return RemoveDirectoryW(FS_W(p)); }
+static BOOL fs_MoveFileEx(const char *a, const char *b, DWORD flags) { return MoveFileExW(FS_W(a), FS_W(b), flags); }
+static HANDLE fs_FindFirstFile(const char *p, WIN32_FIND_DATAA *fd) {
+    WIN32_FIND_DATAW w;
+    const HANDLE h = FindFirstFileW(FS_W(p), &w);
+    if (h != INVALID_HANDLE_VALUE) fs_find_data(&w, fd);
+    return h;
+}
+static BOOL fs_FindNextFile(HANDLE h, WIN32_FIND_DATAA *fd) {
+    WIN32_FIND_DATAW w;
+    if (!FindNextFileW(h, &w)) return FALSE;
+    fs_find_data(&w, fd);
+    return TRUE;
+}
+#define CreateFileA fs_CreateFile
+#define GetFileAttributesA fs_GetFileAttributes
+#define CreateDirectoryA fs_CreateDirectory
+#define DeleteFileA fs_DeleteFile
+#define RemoveDirectoryA fs_RemoveDirectory
+#define MoveFileExA fs_MoveFileEx
+#define FindFirstFileA fs_FindFirstFile
+#define FindNextFileA fs_FindNextFile
+#endif
+
 const char *hos_romfs_dir, *hos_user_dir;
 
 #define R_PATH_NOT_FOUND 0x202          /* fs::ResultPathNotFound */
@@ -21,7 +87,7 @@ const char *hos_romfs_dir, *hos_user_dir;
 
 #define FS_PATH_MAX 0x302                /* (nn::fs paths: 0x300 bytes and the NUL; DirectoryEntry's name is 0x301) */
 
-typedef struct { char name[32]; char root[MAX_PATH]; int writable; } Mount;
+typedef struct { char name[32]; char root[HOS_FS_PATH]; int writable; } Mount;
 static Mount mounts[16];
 static int nmounts;
 static SRWLOCK mount_lock = SRWLOCK_INIT;
@@ -129,16 +195,16 @@ static const char *gstr(uint64_t a) {
 }
 
 static void make_dirs(const char *path) {   /* every parent of path */
-    char tmp[MAX_PATH];
+    char tmp[HOS_FS_PATH];
     snprintf(tmp, sizeof tmp, "%s", path);
     for (char *p = tmp + 3; *p; p++)
         if (*p == '\\') { *p = 0; CreateDirectoryA(tmp, NULL); *p = '\\'; }
 }
 
 /* ---- handles: a FileHandle / DirectoryHandle is one pointer-sized value; ours are table indices + 1 ----------- */
-typedef struct { char name[MAX_PATH]; int is_dir; uint64_t size; } ExtraEntry;   /* (a listed folder's mod-only entries) */
+typedef struct { char name[HOS_FS_PATH]; int is_dir; uint64_t size; } ExtraEntry;   /* (a listed folder's mod-only entries) */
 typedef struct {
-    HANDLE h; int writable; HANDLE find; WIN32_FIND_DATAA fd; int find_done, is_dir; char path[MAX_PATH];
+    HANDLE h; int writable; HANDLE find; WIN32_FIND_DATAA fd; int find_done, is_dir; char path[HOS_FS_PATH];
     ExtraEntry *extras; int nextras, extra_pos;
 } Handle;
 static Handle *handles[4096];
@@ -177,7 +243,7 @@ HLE(_ZN2nn2fs8MountRomEPKc) {
 }
 
 static int user_mount(const char *name, const char *sub) {
-    char root[MAX_PATH];
+    char root[HOS_FS_PATH];
     snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
     make_dirs(root);
     CreateDirectoryA(root, NULL);
@@ -186,7 +252,7 @@ static int user_mount(const char *name, const char *sub) {
 
 /* nn::fs::IsSaveDataExisting(ApplicationId, account::Uid const&) -> bool */
 HLE(_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE) {
-    char root[MAX_PATH];
+    char root[HOS_FS_PATH];
     snprintf(root, sizeof root, "%s\\save\\%016llx%016llx", hos_user_dir, (unsigned long long)G64(ARG(1) + 8),
              (unsigned long long)G64(ARG(1)));
     RET(GetFileAttributesA(root) != INVALID_FILE_ATTRIBUTES);
@@ -212,7 +278,7 @@ HLE(_ZN2nn2fs17MountCacheStorageEPKci) {
 }
 /* CreateCacheStorage(int index, long size, long journal) */
 HLE(_ZN2nn2fs18CreateCacheStorageEill) {
-    char root[MAX_PATH];
+    char root[HOS_FS_PATH];
     snprintf(root, sizeof root, "%s\\cache\\%d\\", hos_user_dir, (int)ARG(0));
     make_dirs(root);
     RET(0);
@@ -224,7 +290,7 @@ HLE(_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE) { G64(ARG(0)
 HLE(_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi) {
     int n = 0, max = (int)ARG(3);
     for (; cache_list_pos < 16 && n < max; cache_list_pos++) {
-        char root[MAX_PATH];
+        char root[HOS_FS_PATH];
         snprintf(root, sizeof root, "%s\\cache\\%d", hos_user_dir, cache_list_pos);
         if (GetFileAttributesA(root) != INVALID_FILE_ATTRIBUTES) {
             memset(GP(ARG(1) + 0x20 * n), 0, 0x20);
@@ -255,7 +321,7 @@ static int fs_trace(void) {
 }
 /* OpenFile(FileHandle*, char const* path, int mode): mode bit 0 read, bit 1 write, bit 2 append */
 HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     int writable = 0;
     const char *g = gstr(ARG(1));
     if (!host_path(g, path, sizeof path, &writable)) { hos_log("fs: OpenFile(%s): unknown mount", g); RET(R_PATH_NOT_FOUND); return; }
@@ -273,14 +339,14 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
         }
     }
     { int hos_ultrawide_redirect(const char *guest, char *out, size_t cap);   /* (totk_ultrawide_ui.c: the HUD) */
-      char alt[MAX_PATH];
+      char alt[HOS_FS_PATH];
       if (!want_write && hos_ultrawide_redirect(g, alt, sizeof alt)) snprintf(path, sizeof path, "%s", alt); }
     if (!want_write && hos_blank_cached_icon(g, path)) { RET(R_PATH_NOT_FOUND); return; }
     {   /* HOS_FS_OVERLAY=<folder> (a test): a file of the game's data found there is read in place of the game's own */
         const char *ov = getenv("HOS_FS_OVERLAY");
         const char *rel = !want_write && ov ? strstr(g, ":/") : NULL;
         if (rel) {
-            char alt[MAX_PATH];
+            char alt[HOS_FS_PATH];
             snprintf(alt, sizeof alt, "%s/%s", ov, rel + 2);
             if (GetFileAttributesA(alt) != INVALID_FILE_ATTRIBUTES) {
                 hos_log("fs: OpenFile(%s): from the overlay", g);
@@ -311,6 +377,7 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
 static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t size) {
     Handle *fh = get_handle(c, id);
     uint64_t done = 0;
+    if (!hos_guest_range(buf, size)) return 0;   /* (hookshot: the file's bytes go into guest memory only) */
     static int64_t delay_ns = -1, delay_after_ns;   /* HOS_FS_DELAY_MS=<ms>[,<after s>] (experiment): slower reads */
     if (delay_ns < 0) {
         const char *e = getenv("HOS_FS_DELAY_MS");
@@ -361,7 +428,7 @@ HLE(_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE) {
 }
 /* GetFileSize(long*, FileHandle) */
 HLE(_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE) {
-    LARGE_INTEGER sz;
+    LARGE_INTEGER sz = {0};   /* (hookshot: a folder's handle has no size: 0, not the host stack's bytes) */
     GetFileSizeEx(get_handle(c, ARG(1))->h, &sz);
     G64(ARG(0)) = (uint64_t)sz.QuadPart;
     RET(0);
@@ -373,7 +440,8 @@ HLE(_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE) {
     ov.Offset = (DWORD)ARG(1);
     ov.OffsetHigh = (DWORD)(ARG(1) >> 32);
     DWORD put = 0;
-    WriteFile(fh->h, GP(ARG(2)), (DWORD)ARG(3), &put, &ov);
+    /* (hookshot) from guest memory only, and the whole size: a DWORD cut wrote less than asked and said so */
+    if (ARG(3) <= 0xFFFFFFFFu && hos_guest_range(ARG(2), ARG(3))) WriteFile(fh->h, GP(ARG(2)), (DWORD)ARG(3), &put, &ov);
     RET(put == ARG(3) ? 0 : 0x2EE202);
 }
 HLE(_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl) {
@@ -394,7 +462,7 @@ HLE(_ZN2nn2fs9CloseFileENS0_10FileHandleE) {
 
 /* CreateFile(char const*, long size) */
 HLE(_ZN2nn2fs10CreateFileEPKcl) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
     make_dirs(path);
@@ -408,27 +476,27 @@ HLE(_ZN2nn2fs10CreateFileEPKcl) {
     RET(0);
 }
 HLE(_ZN2nn2fs10DeleteFileEPKc) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable || !DeleteFileA(path)) { RET(R_PATH_NOT_FOUND); return; }
     RET(0);
 }
 HLE(_ZN2nn2fs15CreateDirectoryEPKc) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
     make_dirs(path);
     RET(CreateDirectoryA(path, NULL) ? 0 : GetLastError() == ERROR_ALREADY_EXISTS ? R_PATH_EXISTS : R_PATH_NOT_FOUND);
 }
 static void delete_tree(const char *dir) {
-    char pat[MAX_PATH];
+    char pat[HOS_FS_PATH];
     WIN32_FIND_DATAA fd;
     snprintf(pat, sizeof pat, "%s\\*", dir);
     HANDLE f = FindFirstFileA(pat, &fd);
     if (f != INVALID_HANDLE_VALUE) {
         do {
             if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-            char sub[MAX_PATH];
+            char sub[HOS_FS_PATH];
             snprintf(sub, sizeof sub, "%s\\%s", dir, fd.cFileName);
             /* (hookshot) a link (a symbolic link, a junction) goes itself: never what it points to */
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { if (!DeleteFileA(sub)) RemoveDirectoryA(sub); }
@@ -440,7 +508,7 @@ static void delete_tree(const char *dir) {
     RemoveDirectoryA(dir);
 }
 HLE(_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
     /* (hookshot) the folder named itself a link: the link goes, never what it points to (as for the links inside) */
@@ -454,7 +522,7 @@ HLE(_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc) {
     RET(0);
 }
 HLE(_ZN2nn2fs10RenameFileEPKcS2_) {
-    char a[MAX_PATH], b[MAX_PATH];
+    char a[HOS_FS_PATH], b[HOS_FS_PATH];
     int w1 = 0, w2 = 0;
     if (!host_path(gstr(ARG(0)), a, sizeof a, &w1) || !host_path(gstr(ARG(1)), b, sizeof b, &w2) || !w1 || !w2) { RET(R_PATH_NOT_FOUND); return; }
     RET(MoveFileExA(a, b, MOVEFILE_REPLACE_EXISTING) ? 0 : R_PATH_NOT_FOUND);
@@ -464,7 +532,7 @@ static void count_extra(void *arg, const char *name, int is_dir, uint64_t size) 
 static const char *rom_rel(const char *guest) {   /* the path inside the RomFS mount, or NULL */
     const char *colon = strchr(guest, ':');
     if (!colon || !hos_romfs_dir) return NULL;
-    char root[MAX_PATH];
+    char root[HOS_FS_PATH];
     if (!host_path(guest, root, sizeof root, NULL)) return NULL;
     AcquireSRWLockShared(&mount_lock);
     int rom = 0;
@@ -486,7 +554,7 @@ static int is_mod_dir(const char *guest) {
 
 /* GetEntryType(DirectoryEntryType*, char const*): 0 directory, 1 file */
 HLE(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc) {
-    char path[MAX_PATH];
+    char path[HOS_FS_PATH];
     if (!host_path(gstr(ARG(1)), path, sizeof path, NULL)) { RET(R_PATH_NOT_FOUND); return; }
     hos_blank_cached_icon(gstr(ARG(1)), path);
     DWORD at = GetFileAttributesA(path);
@@ -508,7 +576,7 @@ static void add_extra(void *arg, const char *name, int is_dir, uint64_t size) {
     e->is_dir = is_dir, e->size = size;
 }
 HLE(_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci) {
-    char path[MAX_PATH], pat[MAX_PATH];
+    char path[HOS_FS_PATH], pat[HOS_FS_PATH];
     if (!host_path(gstr(ARG(1)), path, sizeof path, NULL)) { RET(R_PATH_NOT_FOUND); return; }
     snprintf(pat, sizeof pat, "%s\\*", path);
     Handle *dh = (Handle *)calloc(1, sizeof *dh);

@@ -36,10 +36,13 @@ inline void ub_thread_off() {}
 
 
 def check_source():
-    """The pipeline job a draw waits for is pushed with its flag, and jobs_wait still looks for it in the queue"""
+    """The pipeline and translation jobs a draw waits for are pushed with their flags, and jobs_wait still looks for them in the queue"""
     draw = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
-    if "}, false, &e->ready);" not in draw:
+    if "}, false, &e->ready," not in draw:
         raise SystemExit("graphics_pipeline's build job is pushed without its ready flag")
+    shader = (ROOT / "gpu/vk/vk_shader.cpp").read_text(encoding="utf-8")
+    if shader.count("&raw->ready,") < 2:
+        raise SystemExit("a graphics or mesh translation job is pushed without its ready flag")
     jobs = (ROOT / "gpu/vk/vk_jobs.cpp").read_text(encoding="utf-8")
     wait = jobs[jobs.index("void jobs_wait("):]
     wait = wait[:wait.index("\n}\n")]

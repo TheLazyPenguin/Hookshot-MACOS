@@ -1,0 +1,11 @@
+# Hookshot build / tools Python deps. From the clone:
+#   python -m pip install -r requirements.txt
+#
+# Pins match scripts/linux/deps.sh (AppImage Python). Button-prompt packages are
+# build-time only; without them the game still builds and uses Switch icons.
+lz4==4.4.5
+numpy==2.5.4
+capstone==5.0.9
+unicorn==2.1.4
+zstandard==0.25.0
+-r nx2/prompt_requirements.txt

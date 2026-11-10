@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 
+RUN_ALL_ARGS = ["--cc", "gcc"]
+
 ROOT = Path(__file__).resolve().parents[1]
 FLOAT = "_ZN2nn5audio29SetVoiceBiquadFilterParameterEPNS0_9VoiceTypeEiRKNS0_22TBiquadFilterParameterIfEE"
 LEGACY = "_ZN2nn5audio29SetVoiceBiquadFilterParameterEPNS0_9VoiceTypeEiRKNS0_21BiquadFilterParameterE"

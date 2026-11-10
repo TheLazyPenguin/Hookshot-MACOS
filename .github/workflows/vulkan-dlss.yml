@@ -3,6 +3,8 @@
 # pull request only when a file DLSS's build depends on changed (the paths below), not on every push. scripts/ngx_sdk.py
 # fetches the SDK at its pinned release, SHA-256 checked, without DLSS's runtime: NVIDIA's license is accepted for that run
 # alone (--accept-nvidia-license), and nothing of it is uploaded or cached.
+# AMD FSR 4 (HOOKSHOT_FSR=1: AMD's MIT headers, nothing downloaded) is built in the same run: both engines share
+# vk_temporal.cpp.
 name: Vulkan back end with NVIDIA DLSS
 
 on:
@@ -10,6 +12,9 @@ on:
     branches: [main, dev]
     paths:
       - 'gpu/vk/vk_dlss*'
+      - 'gpu/vk/vk_temporal*'
+      - 'gpu/vk/vk_fsr4*'
+      - 'third_party/fidelityfx/**'
       - 'gpu/vk/vk_reflex*'
       - 'gpu/vk/vk_ngx_msvc_rt.cpp'
       - 'gpu/vk/upscaler_rows.h'
@@ -25,6 +30,9 @@ on:
   pull_request:
     paths:
       - 'gpu/vk/vk_dlss*'
+      - 'gpu/vk/vk_temporal*'
+      - 'gpu/vk/vk_fsr4*'
+      - 'third_party/fidelityfx/**'
       - 'gpu/vk/vk_reflex*'
       - 'gpu/vk/vk_ngx_msvc_rt.cpp'
       - 'gpu/vk/upscaler_rows.h'
@@ -52,7 +60,7 @@ defaults:
 
 jobs:
   vulkan-dlss:
-    name: Windows Vulkan back end with NVIDIA DLSS (llvm-mingw, link check)
+    name: Windows Vulkan back end with NVIDIA DLSS and AMD FSR 4 (llvm-mingw, link check)
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
@@ -96,15 +104,17 @@ jobs:
         run: echo "HOOKSHOT_MINGW=$(python -I scripts/release_parts.py llvm-mingw "$RUNNER_TEMP/llvm")" >> "$GITHUB_ENV"
       - name: NVIDIA's DLSS SDK (headers and nvsdk_ngx_s.lib)
         run: python -I scripts/ngx_sdk.py --platform windows --build-only --accept-nvidia-license "$RUNNER_TEMP/ngx-sdk"
-      - name: hookshot_vk.dll with NVIDIA DLSS
+      - name: hookshot_vk.dll with NVIDIA DLSS and AMD FSR 4
         env:
           RX_VK_ONLY: '1'
           RX_RELEASE: '1'
+          HOOKSHOT_FSR: '1'
         run: |
           OOT_WORK="$RUNNER_TEMP/vk-work" RX_CPM="$GITHUB_WORKSPACE/_deps/cpm" HOOKSHOT_NGX_SDK="$RUNNER_TEMP/ngx-sdk" \
             python -I nx2/build.py --standalone --jobs "$NUMBER_OF_PROCESSORS" | tee "$RUNNER_TEMP/vk-build.log"
           test "${PIPESTATUS[0]}" -eq 0
           grep -q "with NVIDIA DLSS" "$RUNNER_TEMP/vk-build.log"
+          grep -q "with AMD FSR 4" "$RUNNER_TEMP/vk-build.log"
       # (what it loads is only Windows' own: the system DLLs and the UCRT's api-ms-win-crt-*. NVIDIA's runtime, nvngx_dlss.dll,
       # is loaded by NGX at run time from the game folder's ngx folder, and its core, _nvngx.dll, from the driver's)
       - name: Imports

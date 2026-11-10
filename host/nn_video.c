@@ -161,6 +161,7 @@ HLE(_ZN2nn5codec31CalculateDecoderImagePoolBufferEPmS1_RKNS0_27VideoDecoderImage
 HLE(_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj) {
     const Pref *p = (const Pref *)GP(ARG(3));
     Pool *o = (Pool *)calloc(1, sizeof *o);
+    if (!o) hos_fatal(NULL, "video: out of memory for an image pool");
     o->w = p->magic == PREF_MAGIC && p->w ? p->w : 1280, o->h = p->magic == PREF_MAGIC && p->h ? p->h : 720;
     o->format = p->magic == PREF_MAGIC ? (int)p->format : 2;
     o->count = (int)ARG(4) > 0 ? (int)ARG(4) : 1;
@@ -254,7 +255,8 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEj
                     (unsigned long long)c->x[30]);
         }
     }
-    if (!o || i >= (uint32_t)o->count || x >= (uint32_t)o->w) { RET(0); return; }
+    /* (hookshot) and no NV12 when its allocation failed: o->nv12 + offset was then any host address, copied to the game */
+    if (!o || !o->nv12 || i >= (uint32_t)o->count || x >= (uint32_t)o->w) { RET(0); return; }
     o->read_by_api = 1;
     const uint8_t *yp = o->nv12 + (size_t)i * o->w * o->h * 3 / 2, *uvp = yp + (size_t)o->w * o->h;
     const uint32_t cw = x + w <= (uint32_t)o->w ? w : o->w - x;

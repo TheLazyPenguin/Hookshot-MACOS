@@ -91,8 +91,13 @@ Id GuestLane(EmitContext& ctx, Id index) {
     return ctx.OpBitwiseAnd(ctx.U32[1], index, ctx.Const(31U));
 }
 
+bool UseShuffleFallback(EmitContext& ctx) {
+    return ctx.profile.has_broken_spirv_subgroup_shuffle ||
+           (ctx.profile.has_broken_spirv_fragment_shuffle && ctx.stage == Stage::Fragment);
+}
+
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
-    if (!ctx.profile.has_broken_spirv_subgroup_shuffle) {
+    if (!UseShuffleFallback(ctx)) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }
     Id result{ctx.u32_zero_value};
@@ -106,7 +111,7 @@ Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
 }
 
 Id ShuffleRelative(EmitContext& ctx, Id value, Id delta, Id src_thread_id, spv::Op op) {
-    if (!ctx.profile.support_shuffle_relative) {
+    if (!ctx.profile.support_shuffle_relative || UseShuffleFallback(ctx)) {
         return ShuffleAbsolute(ctx, value, HostThreadId(ctx, src_thread_id));
     }
     const Id result{ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, delta)};
@@ -308,7 +313,11 @@ Id EmitShuffleButterfly(EmitContext& ctx, IR::Inst* inst, Id value, Id index, Id
     const Id in_range{ctx.OpSLessThanEqual(ctx.U1, src_thread_id, max_thread_id)};
 
     SetInBoundsFlag(inst, in_range);
-    const Id shuffled{ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, mask)};
+    // (hookshot) through the broadcasts where shuffles are broken (UseShuffleFallback: AMD's fragment stages, Lichii #273),
+    // as the absolute and relative shuffles are; #273 left SHFL.BFLY native, and some of Kokiri Forest's plants use it
+    const Id shuffled{UseShuffleFallback(ctx)
+                          ? ShuffleAbsolute(ctx, value, HostThreadId(ctx, src_thread_id))
+                          : ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, mask)};
     return ctx.OpSelect(ctx.U32[1], in_range, shuffled, value);
 }
 
@@ -330,6 +339,8 @@ Id EmitQuadSwap(EmitContext& ctx, Id value, Id direction) {
         return result;
     }
     const Id xor_mask{ctx.OpIAdd(ctx.U32[1], direction, ctx.Const(1u))};
+    // (hookshot) not through UseShuffleFallback's broadcasts: a program with quad shuffles alone (uses_quad_shuffles) has
+    // neither the lane id input nor the ballot capability they need, and the SPIR-V made with them crashed the start
     return ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, xor_mask);
 }
 

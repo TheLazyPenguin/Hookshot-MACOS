@@ -80,7 +80,7 @@ def patch_scene(s):
 
 def apply(gen):
     done = {"scene base scale (f_806702e0)": 0, "scene scale check (f_831f3200)": 0}
-    for path in sorted(glob.glob(os.path.join(gen, "code_*.c"))):
+    for path in sorted(glob.glob(os.path.join(glob.escape(gen), "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
             s = f.read()
         out = s

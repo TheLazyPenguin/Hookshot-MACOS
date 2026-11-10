@@ -34,6 +34,18 @@ static wchar_t g_status[512];
 static volatile LONG g_percent = -1;
 static DWORD g_http_status;   /* (the last answer: 0 when the server was not reached) */
 static wchar_t g_cmdline[2048];
+/* (RecompLauncher) --cli <make_game.py's options>: no window, the builder's lines on this process's stdout and stderr, its exit code
+   as ours; --play <game folder>: the game itself, waited for. Neither is used by the builder's own start, which is unchanged. */
+static int g_headless;
+static DWORD g_exit;
+
+static void say_error(const wchar_t *msg) {
+    char u[2048];
+    const int n = WideCharToMultiByte(CP_UTF8, 0, msg, -1, u, (int)sizeof u - 8, NULL, NULL);
+    const HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD wrote;
+    if (n > 0 && h && h != INVALID_HANDLE_VALUE) WriteFile(h, "error ", 6, &wrote, NULL), WriteFile(h, u, n - 1, &wrote, NULL), WriteFile(h, "\n", 1, &wrote, NULL);
+}
 
 typedef struct {
     char sha[65];
@@ -83,6 +95,7 @@ static void fail(const wchar_t *fmt, ...) {
     va_start(ap, fmt);
     vswprintf(msg, 1024, fmt, ap);
     va_end(ap);
+    if (g_headless) say_error(msg), ExitProcess(1);
     MessageBoxW(g_win, msg, L"Hookshot Builder setup", MB_OK | MB_ICONERROR);
     PostMessageW(g_win, WM_DONE, 1, 0);
     ExitThread(1);
@@ -661,8 +674,12 @@ static DWORD WINAPI work(LPVOID unused) {
                       L"few minutes and it carries on from here."
                     : L"Downloading part %d of %d failed. Check your connection and free space, then try again.", i + 1, nparts);
                 if (strcmp(have, p->sha)) DeleteFileW(part), fail(L"Part %d of %d did not download correctly (its checksum differs). Try again.", i + 1, nparts);
-                DeleteFileW(zip);
-                MoveFileW(part, zip);
+                /* (the checked file or nothing: an old <sha>.zip that could not be removed is never unpacked instead) */
+                if (!MoveFileExW(part, zip, MOVEFILE_REPLACE_EXISTING)) {
+                    const DWORD e = GetLastError();
+                    DeleteFileW(part);
+                    fail(L"Could not place part %d of %d in %ls (Windows error %lu).", i + 1, nparts, downloads, e);
+                }
             }
             status(L"Unpacking part %d of %d...", i + 1, nparts);
             wchar_t dest[MAX_PATH], wdest[260], tarcmd[2 * MAX_PATH + 64], sys[MAX_PATH];
@@ -674,6 +691,13 @@ static DWORD WINAPI work(LPVOID unused) {
             GetSystemDirectoryW(sys, MAX_PATH);
             swprintf(tarcmd, 2 * MAX_PATH + 64, L"\"%ls\\tar.exe\" -xf \"%ls\" -C \"%ls\"", sys, zip, dest);
             RunResult tar = run_wait(tarcmd, dest);
+            if (tar.start_error == ERROR_FILE_NOT_FOUND)
+                fail(L"Windows' tar.exe was not found (Windows error 2).\n"
+                     L"Open Command Prompt as administrator and run:\n"
+                     L"DISM /Online /Cleanup-Image /RestoreHealth\n"
+                     L"After DISM succeeds, run:\nsfc /scannow\n"
+                     L"Then restart Windows and run setup again.\n"
+                     L"Archive: %ls\nDestination: %ls", zip, dest);
             if (tar.start_error) fail(L"Could not start Windows' tar.exe (Windows error %lu).\nArchive: %ls\nDestination: %ls", tar.start_error, zip, dest);
             if (tar.status_error) fail(L"Could not read Windows' tar.exe exit status (Windows error %lu).\nArchive: %ls\nDestination: %ls", tar.status_error, zip, dest);
             if (tar.code) {
@@ -724,7 +748,18 @@ static DWORD WINAPI work(LPVOID unused) {
     swprintf(cmd, 4096, L"\"%ls\" %ls", exe, g_cmdline);
     STARTUPINFOW si = {sizeof si};
     PROCESS_INFORMATION pi;
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) fail(L"Could not start %ls.", exe);
+    BOOL inherit = FALSE;
+    if (g_headless) {   /* (the builder writes to the same pipes we were given) */
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE), si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE), si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        if (si.hStdOutput && si.hStdOutput != INVALID_HANDLE_VALUE && si.hStdError && si.hStdError != INVALID_HANDLE_VALUE) {
+            if (!si.hStdInput || si.hStdInput == INVALID_HANDLE_VALUE) si.hStdInput = NULL;
+            SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            si.dwFlags = STARTF_USESTDHANDLES, inherit = TRUE;
+        }
+    }
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, inherit, 0, NULL, dir, &si, &pi)) fail(L"Could not start %ls.", exe);
+    if (g_headless) WaitForSingleObject(pi.hProcess, INFINITE), GetExitCodeProcess(pi.hProcess, &g_exit);
     CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
     PostMessageW(g_win, WM_DONE, 0, 0);
     return 0;
@@ -768,11 +803,41 @@ static int launch_installed(const wchar_t *args) {
     return 1;
 }
 
+/* (RecompLauncher's Play) --play <game folder>: bin\hookshot.exe there, started like the game folder's launcher starts it but without
+   its update question, and waited for, so the launcher knows when the session ends. */
+static int play_folder(const wchar_t *args) {
+    wchar_t folder[MAX_PATH], cmd[MAX_PATH + 32];
+    while (*args == L' ') args++;
+    const int quoted = *args == L'"';
+    size_t k = 0;
+    for (args += quoted; *args && !(quoted ? *args == L'"' : *args == L' ') && k + 1 < MAX_PATH; ) folder[k++] = *args++;
+    folder[k] = 0;
+    swprintf(cmd, MAX_PATH + 32, L"\"%ls\\bin\\hookshot.exe\"", folder);
+    _wputenv_s(L"HOOKSHOT_NO_UPDATE_CHECK", L"1");
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    DWORD code = 1;
+    if (!k || !CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, folder, &si, &pi)) {
+        g_headless = 1;
+        say_error(L"No built game to start. Build it first (the game folder needs bin\\hookshot.exe).");
+        return 1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE), GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    return (int)code;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show) {
     (void)prev;
     /* (libraries loaded from here on come from System32 only, never from the folder the setup was downloaded to) */
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     wcsncpy(g_cmdline, cmdline ? cmdline : L"", 2047);
+    {
+        const wchar_t *c = g_cmdline;
+        while (*c == L' ') c++;
+        if (!wcsncmp(c, L"--play", 6) && (c[6] == L' ' || !c[6])) return play_folder(c + 6);
+        if (!wcsncmp(c, L"--cli", 5) && (c[5] == L' ' || !c[5])) g_headless = 1, show = SW_HIDE;
+    }
     {
         wchar_t self[MAX_PATH];
         GetModuleFileNameW(NULL, self, MAX_PATH);
@@ -819,5 +884,5 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show) {
     CloseHandle(CreateThread(NULL, 0, work, NULL, 0, NULL));
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) TranslateMessage(&m), DispatchMessageW(&m);
-    return 0;
+    return (int)g_exit;
 }

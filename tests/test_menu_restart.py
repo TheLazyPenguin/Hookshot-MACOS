@@ -14,6 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "g++", "--cc", "gcc"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 RELAUNCH_TEST = r"""
@@ -76,7 +78,7 @@ def function(source, start):
 
 def sources():
     menu = (ROOT / "gpu" / "vk" / "vk_menu.cpp").read_text(encoding="utf-8")
-    for row in ('"GPU device", &opts.gpu_device', '"Output resolution", &opts.output_res', '"Handheld profile", &opts.handheld',
+    for row in ('"GPU device", &opts.gpu_device', '"Output resolution", &opts.output_res', '"Profile", &opts.handheld',
                 '"Ultrawide", &opts.ultrawide', '"Robust buffers", &opts.robust'):
         at = menu.find(row)
         if at < 0:
@@ -84,6 +86,11 @@ def sources():
         entry = menu[at:menu.index("},", at)]
         if not re.search(r",\s*true$", entry):
             raise SystemExit("vk_menu.cpp: %s is not marked as taking a restart" % row.split(",")[0])
+    # (the Profile row was "Handheld profile": its key stays the one host/nn_applet.c reads, and its values say Docked and Handheld)
+    if not re.search(r'&opts\.handheld\)\s*return\s*"handheld_profile"', function(menu, "const char* ini_key(const Row& r) {")):
+        raise SystemExit("ini_key: the Profile row is not saved as handheld_profile (host/nn_applet.c would not read it)")
+    if 'return v ? "Handheld" : "Docked";' not in menu:
+        raise SystemExit("vk_menu.cpp: the Profile row does not show Docked and Handheld")
     if "(restart)" in menu:
         raise SystemExit("vk_menu.cpp: a value still says (restart) whatever runs: \"(after restart)\" is added while it differs")
     if '"After restart"' not in menu or "Restart needed: " not in menu:

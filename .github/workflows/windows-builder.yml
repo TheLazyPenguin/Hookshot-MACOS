@@ -109,6 +109,7 @@ jobs:
           dotnet publish builder/HookshotBuilder/HookshotBuilder.csproj --configuration Release
           -p:Version="$VERSION" -p:NuGetAudit=false --output "$RUNNER_TEMP/publish"
 
+      # (it stops when assets/pipeline_states.bin.xz, the pipeline state list every release ships, is missing or does not read)
       - name: Package folder
         run: >-
           python -I scripts/release_parts.py package "$RUNNER_TEMP/package"
@@ -121,6 +122,13 @@ jobs:
             --base "https://github.com/$GITHUB_REPOSITORY/releases/download/builder-parts" ${PREVIOUS:+--reuse "$PREVIOUS"}
           # (a release holds the setup as HookshotBuilder.exe: builder/HookshotBuilder/Updater.cs)
           cp "$RUNNER_TEMP/HookshotBuilder-Setup.exe" dist/HookshotBuilder.exe
+          # (RecompLauncher installs this zip: the setup beside its recomplauncher.json, named for its system and processor)
+          python -I - "dist/Hookshot-$TAG-Windows-x64.zip" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as z:
+              z.write("dist/HookshotBuilder.exe", "HookshotBuilder.exe")
+              z.write("recomplauncher.json", "recomplauncher.json")
+          PY
           cat dist/hookshot-setup.txt
           ls -l dist
 
@@ -231,4 +239,4 @@ jobs:
             fi
           done
       - name: Setup and its list to the release
-        run: scripts/release_upload.sh "$GITHUB_REF_NAME" dist/HookshotBuilder.exe dist/hookshot-setup.txt
+        run: scripts/release_upload.sh "$GITHUB_REF_NAME" dist/HookshotBuilder.exe dist/hookshot-setup.txt dist/Hookshot-*-Windows-x64.zip

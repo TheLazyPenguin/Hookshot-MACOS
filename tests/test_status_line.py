@@ -20,15 +20,15 @@ def main():
     replay = (vk / "vk_replay.cpp").read_text(encoding="utf-8")
     tick = replay[replay.index("void status_tick() {"):]
     tick = tick[:tick.index("\n}\n")]
-    for use in ("vram_usage_now(", "sl::crossed(", "sl::over_text(", "sl::vram_text(", "dlss_status(", "sl::kEvery"):
+    for use in ("vram_usage_now(", "sl::crossed(", "sl::over_text(", "sl::vram_text(", "temporal_status(", "sl::kEvery"):
         if use not in tick:
             raise SystemExit("status_tick does not use %s" % use)
     present = replay[replay.index("void do_present("):]
     if "status_tick();" not in present[:present.index("\n}\n")]:
         raise SystemExit("do_present does not call status_tick: no status line")
-    dlss = (vk / "vk_dlss.cpp").read_text(encoding="utf-8")
-    if "frames drawn; this one's jitter" in dlss:
-        raise SystemExit("vk_dlss.cpp still logs DLSS's own 600-frame line beside the status line")
+    for name in ("vk_dlss.cpp", "vk_fsr4.cpp", "vk_temporal.cpp"):
+        if "frames drawn; this one's jitter" in (vk / name).read_text(encoding="utf-8"):
+            raise SystemExit("%s still logs an upscaler's own 600-frame line beside the status line" % name)
     with tempfile.TemporaryDirectory(prefix="status-line-") as tmp:
         exe = Path(tmp) / "status-line"
         subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests" / "test_status_line.cpp"),

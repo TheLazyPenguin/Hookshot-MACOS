@@ -26,7 +26,7 @@ def split(gen, pieces):
     whole = path + ".whole"
     if os.path.exists(path):
         os.replace(path, whole)
-    for old in glob.glob(os.path.join(gen, "code_hot_*.c")):
+    for old in glob.glob(os.path.join(glob.escape(gen), "code_hot_*.c")):
         os.remove(old)
     with open(whole, encoding="utf-8", newline="") as f:
         text = f.read()

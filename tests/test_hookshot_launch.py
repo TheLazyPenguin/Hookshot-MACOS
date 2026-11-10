@@ -9,6 +9,9 @@ import subprocess
 import tempfile
 import unittest
 
+# (Linux only)
+RUN_ALL_SKIP = {"windows": "the Linux launcher, a POSIX shell script"}
+
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "builder" / "linux" / "hookshot-launch"
 

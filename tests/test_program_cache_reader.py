@@ -103,6 +103,40 @@ class ProgramCacheReaderTests(unittest.TestCase):
             run = subprocess.run([str(binary)], text=True, capture_output=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_descriptor_counts_are_bounded(self):
+        # (two cached counts of 2^31 wrapped the layout's sum to 0; one made the binds loop billions of times)
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("if (!descriptor_counts_fit(i)) r.bad = true;", block(source, "void get_info("))
+        draw = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
+        self.assertIn("uint64_t total = 0;", block(draw, "void ensure_layout("))
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        if not compiler:
+            self.skipTest("no C++ compiler")
+        start = source.index("constexpr uint32_t kMaxDescriptorCount")
+        fit = source[start:source.index("void get_info(", start)]
+        test = "#include <cstdint>\n#include <vector>\n" + fit + r"""
+struct D { uint32_t count; };
+struct Info { std::vector<D> constant_buffer_descriptors, storage_buffers_descriptors, texture_buffer_descriptors,
+                             image_buffer_descriptors, texture_descriptors, image_descriptors; };
+int main() {
+    Info i;
+    i.texture_descriptors = {{1}, {kMaxDescriptorCount}};
+    if (!descriptor_counts_fit(i)) return 1;
+    i.image_descriptors = {{0x80000000u}};
+    if (descriptor_counts_fit(i)) return 2;
+    i.image_descriptors.clear();
+    i.storage_buffers_descriptors = {{kMaxDescriptorCount + 1}};
+    return descriptor_counts_fit(i) ? 3 : 0;
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="hookshot-descriptor-counts-") as tmp:
+            src, binary = Path(tmp) / "t.cpp", Path(tmp) / "t"
+            src.write_text(test, encoding="utf-8")
+            build = subprocess.run([compiler, "-std=c++20", "-Wall", "-Wextra", str(src), "-o", str(binary)],
+                                   text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            self.assertEqual(subprocess.run([str(binary)]).returncode, 0)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main(verbosity=1))

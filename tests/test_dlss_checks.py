@@ -18,11 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def check_sources():
     dlss = (ROOT / "gpu" / "vk" / "vk_dlss.cpp").read_text(encoding="utf-8")
     draw = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
+    # (the frame chain DLSS and FSR share: the scene camera and the actor motion)
+    chain = (ROOT / "gpu" / "vk" / "vk_temporal.cpp").read_text(encoding="utf-8")
     # (no fixed floor on the scene's size: it follows the output)
-    for name, src in (("vk_dlss.cpp", dlss), ("vk_draw.cpp", draw)):
+    for name, src in (("vk_dlss.cpp", dlss), ("vk_draw.cpp", draw), ("vk_temporal.cpp", chain)):
         assert not re.search(r"\b(width|height)\s*<\s*(640|360)\b", src), name + ": a fixed scene size floor"
-    assert "!dlss_scene_size(width, height)" in dlss, "dlss_note_scene_draw: the output's sizes"
-    assert "!dlss_scene_size(at.width, at.height)" in draw, "dlss_skin_check: the output's sizes"
+    assert "!temporal_scene_size(width, height)" in chain, "temporal_note_scene_draw: the output's sizes"
+    assert "!temporal_scene_size(at.width, at.height)" in draw, "skin_check: the output's sizes"
     # (the Linux wide(): decoded, not each byte widened)
     widened = [l.strip() for l in dlss.splitlines() if "std::wstring(s.begin(), s.end())" in l]
     assert widened == ["if (dlss_checks::ascii(s)) return std::wstring(s.begin(), s.end());"], \

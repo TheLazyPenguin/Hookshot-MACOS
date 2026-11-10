@@ -1,3 +1,20 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// NOT a Nintendo file, and nothing in it comes from the game. This is SPIR-V compiled from astc_decoder.comp, beside
+// this file: the compute shader src/video_core/host_shaders/astc_decoder.comp of Eglantine, the Switch 2 fork of the
+// emulator Eden (https://github.com/Eglantine-Community/Eglantine, branch nx2), written for yuzu by ameerj (2021, most
+// of it), changed in Eden by ForrestMarkX and CamilleLaVey (2026), and given the Switch 2 GOB layout in Eglantine by
+// Takoroka (c556de5c9a, 2026-10-28). It carries that file's copyright and license notices above; see readme.md,
+// "License".
+// Eden's ASTC decoder, with the Switch 2 block-linear tiling. The Vulkan back end runs it to decode ASTC textures on
+// the GPU, for cards without native ASTC (vk_texture.cpp).
+// Made with glslang 16.6.0: glslangValidator -V --target-env vulkan1.1 --vn ASTC_DECODER_COMP_SPV -o
+// astc_decoder_comp_spv.h astc_decoder.comp (gives these bytes exactly). Edit the .comp and run that again; don't edit
+// this file.
 	// 1116.6.0
 	 #pragma once
 const uint32_t ASTC_DECODER_COMP_SPV[] = {

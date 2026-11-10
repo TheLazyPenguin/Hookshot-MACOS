@@ -1068,6 +1068,7 @@ public:
         // TODO: Read this from TIC
         texture_descriptors[index].is_multisample |= desc.is_multisample;
         texture_descriptors[index].is_integer |= desc.is_integer;
+        texture_descriptors[index].type_fixed &= desc.type_fixed;   // (one user that asked makes the type an answer's)
         return index;
     }
 
@@ -1248,6 +1249,19 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value());
         }
     }
+    // The same for a constant buffer handle sampled as an array: the prepare, with nothing bound, answers 2D, so the
+    // query reported no layers and play translated the program again for the array it binds there
+    std::unordered_map<u64, TextureType> array_types;
+    for (const TextureInst& texture_inst : to_replace) {
+        const IR::Opcode opcode{IndexedInstruction(*texture_inst.inst)};
+        const TextureType type{texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value()};
+        if (texture_inst.cbuf.handle_program == ~0U && !texture_inst.cbuf.has_secondary && texture_inst.cbuf.count == 1 &&
+            opcode != IR::Opcode::ImageQueryDimensions && opcode != IR::Opcode::ImageQueryLod && !IsStorageImageOpcode(opcode) &&
+            (type == TextureType::ColorArray1D || type == TextureType::ColorArray2D ||
+             type == TextureType::ColorArrayCube)) {
+            array_types.try_emplace(u64{texture_inst.cbuf.index} << 32 | texture_inst.cbuf.offset, type);
+        }
+    }
     for (TextureInst& texture_inst : to_replace) {
         // TODO: Handle arrays
         IR::Inst* const inst{texture_inst.inst};
@@ -1256,13 +1270,22 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         const auto& cbuf{texture_inst.cbuf};
         auto flags{inst->Flags<IR::TextureInstInfo>()};
         bool is_multisample{false};
+        bool type_asked{false};   // (the descriptor's type is the bound texture's: TextureDescriptor::type_fixed)
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageQueryDimensions:
             if (const auto it{handle_program_types.find(cbuf.handle_program)};
                 it != handle_program_types.end()) {
                 flags.type.Assign(it->second);
             } else {
+                // (asked all the same: a pipeline state list gives its answers back in order)
                 flags.type.Assign(ReadTextureTypeCached(env, cbuf));
+                type_asked = cbuf.handle_program == ~0U;   // (a handle program is not asked: ReadTextureTypeCached)
+                if (cbuf.handle_program == ~0U && !cbuf.has_secondary && cbuf.count == 1) {
+                    if (const auto it{array_types.find(u64{cbuf.index} << 32 | cbuf.offset)}; it != array_types.end()) {
+                        flags.type.Assign(it->second);
+                        type_asked = false;
+                    }
+                }
             }
             inst->SetFlags(flags);
             break;
@@ -1383,6 +1406,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .count = count,
                     .size_shift = size_shift,
                     .handle_program = cbuf.handle_program,
+                    .type_fixed = !type_asked,
                 });
                 flags.is_integer.Assign(is_integer ? 1 : 0);
             }

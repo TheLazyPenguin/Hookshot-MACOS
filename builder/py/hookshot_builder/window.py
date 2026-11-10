@@ -1367,7 +1367,23 @@ class Window(QWidget):
         if update:
             self.rows["read"].small_text("Your game files are kept: the .nup isn't needed")
 
+    def hard_drive_warning(self):
+        """The game folder or the build files folder on a hard drive: the build works, but much more slowly than on an SSD.
+        None when both are on an SSD (or their drive cannot be told, as on a network share)"""
+        for what, folder in (("game folder", self.out_path.text()), ("build files folder", core.work())):
+            if core.spinning(folder) is not True:
+                continue
+            root = os.path.splitdrive(os.path.abspath(folder))[0] or folder
+            return ("The %s is on a hard drive (%s). An SSD builds the game much faster: build there if you can.\n\n"
+                    "Choose OK to build here anyway, or Cancel to choose another folder." % (what, root))
+        return None
+
     def run(self, tools, args, keep_rows=False, dlss=False):
+        # (a warning, not a stop: the player may have no other folder with the room. An update keeps its own flow)
+        slow = None if keep_rows else self.hard_drive_warning()
+        if slow and QMessageBox.question(self, "Hookshot", slow, QMessageBox.StandardButton.Ok |
+                                         QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Ok:
+            return
         sel = self.worker_box.currentText()
         workers = None if sel == core.AUTOMATIC else int(sel)
         if not keep_rows:

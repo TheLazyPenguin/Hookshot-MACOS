@@ -31,9 +31,9 @@ def main():
         raise SystemExit("fallback_compute_pipelines keeps no record of the programs that failed")
     lock = body.index("std::lock_guard lk(mu);")
     check = body.find("if (failed.count({p.key, p.variant})) return false;")
-    create = body.index("guarded_compute(")
+    create = body.index("cached_compute(")   # (the compile: guarded_compute, through the play caches)
     if check < 0 or not lock < check < create:
-        raise SystemExit("a program that failed is compiled again: the check must come under the lock, before guarded_compute")
+        raise SystemExit("a program that failed is compiled again: the check must come under the lock, before the compile")
     failure = block(body, "&made[i]); r != VK_SUCCESS) {")
     if "failed.insert({p.key, p.variant});" not in failure:
         raise SystemExit("a failed compute pipeline is not remembered")

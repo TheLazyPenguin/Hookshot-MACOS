@@ -6,6 +6,10 @@ import argparse
 from pathlib import Path
 import subprocess,tempfile
 
+RUN_ALL_ARGS = ["--headers", "{spirv_headers}", "--spirv-val", "{spirv_val}"]
+# (spirv-val: SPIRV-Tools comes with the Linux runner's packages, not on Windows)
+RUN_ALL_SKIP = {"windows": "needs spirv-val: checked on Linux"}
+
 ROOT=Path(__file__).resolve().parents[1]
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--headers',type=Path,required=True);p.add_argument('--cxx',default='clang++');p.add_argument('--spirv-val',default='spirv-val');a=p.parse_args()
@@ -22,8 +26,9 @@ def main():
 namespace IR { enum Attribute { InstanceId, VertexId, BaseInstance, BaseVertex, DrawID }; }
 std::vector<uint32_t> program(unsigned mask,bool supported) {
     using namespace Sirit;
-    // (EmitContext's own member the block reads: a task program's DrawIndex; off here, as for every vertex program)
-    struct Ctx : Module { using Module::Module; bool wants_mesh_first{}; } ctx{0x00010600};ctx.AddCapability(spv::Capability::Shader);
+    // (EmitContext's own members the block reads: a task program's DrawIndex, and the mesh fallback (compute) that has none;
+    // both off here, as for every vertex program)
+    struct Ctx : Module { using Module::Module; bool wants_mesh_first{}, mesh_fallback{}; } ctx{0x00010600};ctx.AddCapability(spv::Capability::Shader);
     ctx.SetMemoryModel(spv::AddressingModel::Logical,spv::MemoryModel::GLSL450);
     struct { bool support_vertex_instance_id; } profile{supported};
     struct { std::array<bool,5> loads; } info{};

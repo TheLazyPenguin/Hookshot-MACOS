@@ -118,6 +118,25 @@ int main() {
     to_image(5, 7, 0, 0, 2560, 1440, &ix, &iy);
     CHECK("no window size: as it is", ix == 5 && iy == 7);
 
+    // ---- a click on an option's row: the name selects it and leaves the value (a click on "Output resolution" to read its
+    // help stepped it, and closing the menu then asked to restart for a resolution never chosen) ----
+    CHECK("the name of a choice: select only", row_click(true, false, 0) == kClickSelect);
+    CHECK("the name of a toggle: select only", row_click(true, true, 0) == kClickSelect);
+    CHECK("a choice's halves", row_click(true, false, -1) == kClickLeft && row_click(true, false, 1) == kClickRight);
+    CHECK("a toggle's other half flips it", row_click(true, true, -1, true) == kClickRight && row_click(true, true, 1, false) == kClickRight);
+    CHECK("a toggle's half already chosen leaves it (Docked clicked while Docked)",
+          row_click(true, true, -1, false) == kClickSelect && row_click(true, true, 1, true) == kClickSelect);
+    CHECK("a page anywhere opens", row_click(false, false, 0) == kClickConfirm && row_click(false, false, 1) == kClickConfirm);
+    {   // (as drawn: the name from 0 to 100, the value from 100 to 300)
+        Map rows;
+        rows.clear(0, 0, 400, 100);
+        rows.add(0, 0, 300, 40, kRow, 3, 100, 300);
+        const Hit name = rows.at(50, 20), left = rows.at(150, 20), right = rows.at(250, 20);
+        CHECK("the name is side 0", name.part == kRow && name.index == 3 && name.side == 0);
+        CHECK("a click on the name changes nothing", row_click(true, false, name.side) == kClickSelect);
+        CHECK("the value's halves", row_click(true, false, left.side) == kClickLeft && row_click(true, false, right.side) == kClickRight);
+    }
+
     std::printf("PASS: the hit-test over the controls as drawn\n");
     return 0;
 }

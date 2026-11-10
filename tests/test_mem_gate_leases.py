@@ -3,6 +3,7 @@ import argparse
 import ast
 from contextlib import ExitStack
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -19,10 +20,10 @@ SOURCE = ROOT / "nx2/build.py"
 
 def actual_build(source):
     tree = ast.parse(source.read_text(encoding="utf-8"))
-    names = {"MemoryGate", "compile_one", "mem_need"}
+    names = {"MemoryGate", "compile_one", "mem_need", "mem_limit_mb"}
     nodes = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     assert {node.name for node in nodes} == names
-    scope = dict(os=os, threading=threading, time=time, COMPILER_MB=1500,
+    scope = dict(os=os, math=math, threading=threading, time=time, COMPILER_MB=1500,
                  free_mb=lambda: 1000000, rss_mb=lambda process: 0)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), scope)
     return scope
@@ -32,7 +33,7 @@ class CompileGateTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(mock.patch.dict(os.environ, {"HOOKSHOT_MEM_RESERVE_GB": "1.5"}))
+        self.stack.enter_context(mock.patch.dict(os.environ, {"HOOKSHOT_MEM_RESERVE_GB": "1.5", "HOOKSHOT_MEM_LIMIT_GB": ""}))
         self.folder = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix="mem-gate-leases-")))
         self.scope = actual_build(SOURCE)
         self.gate = self.scope["MemoryGate"]()

@@ -209,6 +209,9 @@ uint32_t sampler_slot_version(int id) {
 uint64_t sampler_registrations_generation() {
     return samp_gen.load(std::memory_order_acquire);
 }
+void samplers_changed() {
+    samp_gen.fetch_add(1, std::memory_order_acq_rel);
+}
 void texture_released(uint64_t serial) {
     std::lock_guard lk(reg_mu);
     auto it = regs_by_serial.find(serial);

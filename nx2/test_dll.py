@@ -20,6 +20,12 @@ import kit
 import test_leaf
 import toolchain
 
+# (the game: this runs the lifted code of a real dump against Unicorn)
+RUN_ALL_SKIP = {
+    "linux": "needs a full game build (work/build/hookshot_game.dll) and Unicorn",
+    "windows": "needs a full game build (work/build/hookshot_game.dll) and Unicorn",
+}
+
 DLL = os.path.join(kit.WORK, "build", "hookshot_game.dll")
 
 HOST = r"""

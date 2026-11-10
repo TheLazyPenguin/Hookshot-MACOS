@@ -42,8 +42,6 @@ struct Pool { uint64_t lo; };
 struct VkBufferCopy { uint64_t srcOffset, dstOffset, size; };
 std::mutex cpu_words_mu;
 std::vector<uint64_t> cpu_words, cpu_words_recent, cpu_words_new;   // (the big and the recent sorted sets, and noted since: vk_memory.cpp)
-constexpr int kPageShift = 12;
-void shadow_written(const uint32_t*, int64_t) {}   // (memory_cpu_owned tells the write-back diff its pages: not checked here)
 #define CHECK(ok) do { if (!(ok)) { std::fprintf(stderr, "failed line %d\n", __LINE__); std::exit(1); } } while (0)
 ''' + helper + r'''
 // after a merge: both sets sorted with no repeats, no word in both, nothing left noted, and together exactly the words in want

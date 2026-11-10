@@ -8,7 +8,7 @@
 
 int main() {
     namespace mr = mkwvk::menu_restart;
-    const char* names[] = {"GPU device", "Output resolution", "Handheld profile", "Ultrawide", "Robust buffers"};
+    const char* names[] = {"GPU device", "Output resolution", "Profile", "Ultrawide", "Robust buffers"};
     mr::State st;
     // (the five rows as the game started: Auto, 2048x1152, Off, 16:9, Auto)
     int now[5] = {0, 0, 0, 0, 0};

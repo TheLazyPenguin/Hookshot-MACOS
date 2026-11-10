@@ -64,7 +64,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build-linux/deps
-          key: linux-deps-${{ hashFiles('scripts/linux/deps.sh', 'nx2/prompt_requirements.txt') }}
+          key: linux-deps-${{ hashFiles('scripts/linux/deps.sh', 'requirements.txt', 'nx2/prompt_requirements.txt') }}
       - if: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -97,6 +97,22 @@ jobs:
       - name: AppImage
         run: scripts/linux/appimage.sh
 
+      # (AMD FSR 4's Linux side, a build option the AppImage leaves off (gpu/vk/vk_fsr4.cpp: dlopen, the older backend
+      # description, the unit exposure; the descriptor buffers in vk_main.cpp): built once more in a copy of the back end's
+      # work folder, where only vk_fsr4.cpp compiles again. The AppImage above is not changed)
+      - name: hookshot_vk.so with AMD FSR 4 (build check)
+        shell: bash   # (this container's default is sh, which has no PIPESTATUS)
+        run: |
+          cp -r build-linux/vk-work "$RUNNER_TEMP/vk-fsr"
+          rm -f "$RUNNER_TEMP/vk-fsr/sa/build/hookshot_vk.so"   # (the AppImage's own, without FSR: the test below is this build's)
+          D="$PWD/build-linux/deps"
+          OOT_WORK="$RUNNER_TEMP/vk-fsr" EMSDK="$D/emsdk" RX_CPM="$D/cpm" RX_MARCH=x86-64-v3 RX_VK_ONLY=1 RX_RELEASE=1 HOOKSHOT_FSR=1 \
+            "$D/python/bin/python3" -I nx2/build.py --standalone --jobs "$(nproc)" |
+            tee "$RUNNER_TEMP/vk-fsr.log"
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -q "with AMD FSR 4" "$RUNNER_TEMP/vk-fsr.log"
+          test -f "$RUNNER_TEMP/vk-fsr/sa/build/hookshot_vk.so"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hookshot-linux-x86_64
@@ -111,7 +127,7 @@ jobs:
 
       # (a tag's update parts, for the release job: scripts/linux/make_parts.py. Not on other runs: about 240 MB)
       - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hookshot-linux-parts
           path: build-linux/parts/
@@ -137,7 +153,7 @@ jobs:
         with:
           name: Hookshot-linux-x86_64
           path: dist
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: Hookshot-linux-parts
           path: dist/parts

@@ -41,7 +41,7 @@ T=$APPDIR/usr/share/hookshot
 L=$APPDIR/usr/lib/hookshot
 
 # ---- the tools (the sources the player's build compiles, and the scripts) ----
-cp -a nx2 host LICENSE readme.md assets "$T/"
+cp -a nx2 host scripts LICENSE readme.md assets "$T/"
 printf '%s
 ' "$VERSION" > "$T/VERSION"   # (no git history in here: nx2/version.py reads the release name from it)
 mkdir -p "$T/builder" "$T/gpu/render" "$T/gpu/vk" "$T/third_party"
@@ -52,15 +52,24 @@ cp -a gpu/render/*.h "$T/gpu/render/"
 for h in $(grep -rhoE 'gpu/vk/[A-Za-z0-9_]+[.]h' host | sort -u); do if [ -f "$h" ]; then cp -a "$h" "$T/gpu/vk/"; fi; done
 cp -a third_party/opus "$T/third_party/"
 cp -a third_party/kenney_input "$T/third_party/"
+# (NVIDIA DLSS, when ticked in the builder: scripts/ngx_sdk.py and the Vulkan back end's sources, compiled with HOOKSHOT_NGX_SDK)
+mkdir -p "$T/scripts"
+cp scripts/ngx_sdk.py "$T/scripts/"
+cp -a gpu/vk gpu/compat gpu/third_party "$T/gpu/"
+cp -a third_party/imgui third_party/zstd third_party/fonts "$T/third_party/"
 mkdir -p "$T/third_party/zbic" "$T/third_party/a64-kit"
 cp -a third_party/zbic/zbic.so third_party/zbic/LICENSE third_party/zbic/PROVENANCE.md "$T/third_party/zbic/"
 cp -a third_party/a64-kit/* "$T/third_party/a64-kit/"
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 if [ -d work ]; then
     mkdir -p "$T/work/image"
-    for f in hot_funcs.txt hot_order.txt hookshot_pieces.prof pipeline_states.bin; do [ -f "work/$f" ] && cp "work/$f" "$T/work/"; done
+    for f in hot_funcs.txt hot_order.txt hookshot_pieces.prof; do [ -f "work/$f" ] && cp "work/$f" "$T/work/"; done
     [ -f work/image/chunks.txt ] && cp work/image/chunks.txt "$T/work/image/"
 fi
+# (the pipeline state list, assets/pipeline_states.bin.xz, came with assets/ above, and is required: without it a new install's
+# first field load is drawn white for seconds while its pipelines compile; v2.0.8 to v2.0.14 shipped none.
+# scripts/linux/check_player_build.sh reads it back from the image)
+[ -f "$T/assets/pipeline_states.bin.xz" ] || { echo "assets/pipeline_states.bin.xz is missing: a release ships it (docs/development.md, \"The pipeline state list\")"; exit 1; }
 find "$T" -name __pycache__ -prune -exec rm -rf {} +
 
 # ---- what it builds with ----
@@ -71,6 +80,10 @@ cp -a "$DEPS/emsdk/upstream" "$L/emsdk/"
 cp -a "$DEPS/ffmpeg" "$L/ffmpeg"
 cp "$VK" "$L/hookshot_vk.so"
 cp "$DEPS/sdl2/libSDL2-2.0.so.0" "$L/libSDL2-2.0.so.0"
+for d in "$DEPS"/cpm/*/*; do
+    mkdir -p "$T/cpm/${d#"$DEPS/cpm/"}"
+    cp -a "$d/include" "$T/cpm/${d#"$DEPS/cpm/"}/"
+done
 cp -a "$DEPS/licenses" "$T/licenses"   # (LLVM, FFmpeg, dav1d, SDL2: what this AppImage carries besides Hookshot)
 # ---- the licences of the third-party parts compiled into hookshot_vk.so (tests/test_appimage_licenses.py) ----
 mkdir -p "$T/licenses/imgui" "$T/licenses/zstd" "$T/licenses/libertinus"
@@ -94,9 +107,12 @@ for f in crt1.o crti.o crtn.o Scrt1.o rcrt1.o libc.so libc.so.6 libc_nonshared.a
 done
 cp -aL /lib64/ld-linux-x86-64.so.2 "$S/lib64/"
 GCC=$(ls -d /usr/lib/gcc/x86_64-linux-gnu/*/ | sort -V | tail -1)
-G=$S/usr/lib/gcc/x86_64-linux-gnu/$(basename "$GCC")
-mkdir -p "$G"
-for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o libgcc.a libgcc_eh.a libgcc_s.so; do
+GV=$(basename "$GCC")
+G=$S/usr/lib/gcc/x86_64-linux-gnu/$GV
+mkdir -p "$G" "$S/usr/include/c++" "$S/usr/include/x86_64-linux-gnu/c++"
+cp -aL "/usr/include/c++/$GV" "$S/usr/include/c++/"
+cp -aL "/usr/include/x86_64-linux-gnu/c++/$GV" "$S/usr/include/x86_64-linux-gnu/c++/"
+for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o libgcc.a libgcc_eh.a libgcc_s.so libstdc++.a libstdc++fs.a libstdc++exp.a; do
     [ -e "$GCC/$f" ] && cp -aL "$GCC/$f" "$G/" || true
 done
 # (libgcc_s.so is a linker script naming /lib/x86_64-linux-gnu/libgcc_s.so.1: found in the sysroot through lib -> usr/lib)
@@ -111,10 +127,21 @@ int main(void) { pthread_t t; pthread_create(&t, 0, f, 0); pthread_join(t, 0); p
 EOF
 "$L/emsdk/upstream/bin/clang" --sysroot="$S" -fuse-ld=lld -O2 -march=x86-64-v3 "$B/t.c" -o "$B/t" -lpthread -lm
 "$B/t"
+cat > "$B/t.cpp" <<'EOF'
+#include <algorithm>
+#include <filesystem>
+#include <format>
+#include <string>
+extern "C" int t_cpp(int v) { return (int)std::format("{}", v).size(); }
+EOF
+"$L/emsdk/upstream/bin/clang++" --sysroot="$S" -fuse-ld=lld -std=c++20 -O2 -march=x86-64-v3 -shared -fPIC -static-libstdc++ -static-libgcc \
+    "$B/t.cpp" -o "$B/t.so" -ldl -lpthread -lm
 
 # ---- the AppDir's own files ----
 cp builder/linux/AppRun "$APPDIR/AppRun"
 cp builder/linux/hookshot-builder.desktop "$APPDIR/"
+# (RecompLauncher reads this from inside the AppImage, at /recomplauncher.json)
+cp recomplauncher.json "$APPDIR/recomplauncher.json"
 cp assets/hookshot.png "$APPDIR/hookshot.png"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 cp assets/hookshot.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/hookshot.png"

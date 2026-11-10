@@ -7,6 +7,7 @@ with the compiler, sysroot and libraries it brings in the environment.
     hookshot_builder.py --launch <folder>   that folder's launcher: Play, and Update when a newer release is out
     hookshot_builder.py --update <folder>   download the new release (only parts that changed) and build the folder again
 """
+import math
 import os
 import queue
 import re
@@ -31,6 +32,47 @@ import toolchain  # noqa: E402  (default_jobs: RX_JOBS)
 CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "hookshot", "builder.ini")
 STAGES = {"read": "Reading your game files", "lift": "Translating the game to PC code", "compile": "Compiling",
           "finish": "Putting the game folder together", "shaders": "Preparing shaders"}
+DLSS_LICENSE = (
+    "NVIDIA DLSS is NVIDIA's, not Hookshot's. With it ticked, the build downloads NVIDIA's DLSS SDK (release v310.9.16) from "
+    "github.com/NVIDIA/DLSS, under NVIDIA's own license, the NVIDIA RTX SDKs license:\n\n"
+    "https://github.com/NVIDIA/DLSS/blob/9981c6350dc58c0ce21f024fd65e31e851c31689/LICENSE.txt\n\n"
+    "Its files stay on this PC (in the builder's ngx-sdk folder, and libnvidia-ngx-dlss.so in the game folder's ngx folder). "
+    "Hookshot never includes or shares them: never share a game folder built with them.\n\n"
+    "Do you accept NVIDIA's license?"
+)
+
+
+def ngx_sdk_dir():
+    """Where NVIDIA's DLSS SDK goes when the player ticks NVIDIA DLSS: beside the builder's versions, kept across updates."""
+    return os.path.join(linux_update.data_root(), "ngx-sdk")
+
+
+def folder_has_dlss(folder):
+    """Whether a game folder was built with NVIDIA DLSS (its runtime in ngx/, and NVIDIA's license in ngx-sdk)."""
+    if not folder:
+        return False
+    ngx_dir = os.path.join(os.path.expanduser(folder), "ngx")
+    try:
+        has_runtime = any(name.startswith("libnvidia-ngx-dlss.so") for name in os.listdir(ngx_dir))
+    except OSError:
+        return False
+    return has_runtime and os.path.isfile(os.path.join(ngx_sdk_dir(), "LICENSE.txt"))
+
+
+def dlss_args(dlss):
+    return ["--fetch-ngx-sdk", "--accept-nvidia-license"] if dlss else []
+
+
+def make_game_env(dlss, environ=None):
+    """The environment make_game.py runs in. HOOKSHOT_NGX_SDK is set only when DLSS is chosen (one set in the shell is not
+    passed on when unticked, as on Windows), and HOOKSHOT_VK_PREBUILT is dropped so build.py compiles hookshot_vk.so with NGX."""
+    env = dict(os.environ if environ is None else environ)
+    if dlss:
+        env["HOOKSHOT_NGX_SDK"] = ngx_sdk_dir()
+        env.pop("HOOKSHOT_VK_PREBUILT", None)
+    else:
+        env.pop("HOOKSHOT_NGX_SDK", None)
+    return env
 
 
 def left_text(seconds):
@@ -116,6 +158,15 @@ def free_gb(path):
         return None
 
 
+def slow_disk_warning(folder):
+    """The game folder on a hard drive: the build works, but much more slowly than on an SSD. None for an SSD or a drive whose
+    kind cannot be told (a network share)"""
+    if make_game.spinning_disk(os.path.expanduser(folder)) is not True:
+        return None
+    return ("%s is on a hard drive. An SSD builds the game much faster: build there if you can.\n\n"
+            "Build here anyway?" % os.path.expanduser(folder))
+
+
 def xft_dpi():
     """the DPI KDE and GNOME hand X apps when the desktop is scaled. Tk on X11 and XWayland never reads it."""
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
@@ -143,6 +194,108 @@ def ui_scale(screen_height, dpi=None, environ=os.environ):
     return min(screen_height / 1080, 4.0) if screen_height >= 1440 else 1.0
 
 
+# ---- the look: the Windows builder's (builder/HookshotBuilder/App.xaml, "Slate"): its colours, Inter, its sizes in 96 DPI
+# pixels, its rounded buttons, fields and cards. Tk draws no rounded corners or alpha, so they are painted into images here,
+# antialiased and laid over the colour they sit on, and ttk's clam theme draws everything else ----
+PAGE, RAISED, RAISED_HOVER, LINE_STRONG = "#14161a", "#1c1f24", "#23272d", "#3d434c"
+INK, INK_SOFT, INK_FAINT = "#edeff2", "#a2a9b3", "#6e7681"
+BRAND, BRAND_HOVER, BRAND_INK = "#3d63e6", "#4b70f0", "#dfe6ff"
+GO, GO_HOVER, GO_INK, BAD = "#5fb08a", "#70c09a", "#06150e", "#e2776b"
+UI_FONTS = ("Inter", "Inter Variable", "Segoe UI", "Cantarell", "Noto Sans", "DejaVu Sans", "Liberation Sans")
+MONO_FONTS = ("Cascadia Mono", "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono")
+
+
+def mix(color, under, alpha):
+    """color at alpha over under: the WPF window's #AARRGGBB glass brushes, flattened onto what is behind them"""
+    if alpha >= 1:
+        return color
+    a, b = int(color[1:], 16), int(under[1:], 16)
+    return "#%02x%02x%02x" % tuple(round(((a >> s) & 255) * alpha + ((b >> s) & 255) * (1 - alpha)) for s in (16, 8, 0))
+
+
+WHITE = "#ffffff"
+GLASS = mix(WHITE, PAGE, 0x0D / 255)          # cards, fields
+GLASS_LINE = mix(WHITE, PAGE, 0x17 / 255)     # their edges, and a hovered quiet button
+QUIET = mix(WHITE, PAGE, 0x08 / 255)          # Cancel, Change, Open folder
+QUIET_LINE = mix(WHITE, PAGE, 0x1F / 255)
+QUIET_HOVER_LINE = mix(WHITE, PAGE, 0x2A / 255)
+TICK_LINE = mix(WHITE, PAGE, 0x40 / 255)
+TRACK = mix(WHITE, PAGE, 0x12 / 255)          # a bar's empty part
+LOG = mix("#000000", GLASS, 0x33 / 255)       # the build's lines
+
+
+def box(x, y, w, h, r):
+    """a distance function: from a point to the box at x, y of w x h with corners of radius r (negative inside)"""
+    cx, cy, hx, hy = x + w / 2, y + h / 2, w / 2 - r, h / 2 - r
+
+    def dist(px, py):
+        qx, qy = abs(px - cx) - hx, abs(py - cy) - hy
+        return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
+    return dist, (x, y, x + w, y + h)
+
+
+def ring(cx, cy, r, width):
+    def dist(px, py):
+        return abs(math.hypot(px - cx, py - cy) - (r - width / 2)) - width / 2
+    return dist, (cx - r, cy - r, cx + r, cy + r)
+
+
+def stroke(points, width):
+    """a line through points, width wide (a tick, a chevron)"""
+    pairs = list(zip(points, points[1:]))
+
+    def dist(px, py):
+        best = 1e9
+        for (ax, ay), (bx, by) in pairs:
+            dx, dy = bx - ax, by - ay
+            t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+            best = min(best, math.hypot(px - ax - t * dx, py - ay - t * dy))
+        return best - width / 2
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return dist, (min(xs) - width, min(ys) - width, max(xs) + width, max(ys) + width)
+
+
+def triangle(points):
+    """a filled convex triangle (Play's), its points clockwise"""
+    edges = []
+    for (ax, ay), (bx, by) in zip(points, points[1:] + points[:1]):
+        length = math.hypot(bx - ax, by - ay)
+        edges.append((ax, ay, (by - ay) / length, -(bx - ax) / length))
+
+    def dist(px, py):
+        return max((px - ax) * nx + (py - ay) * ny for ax, ay, nx, ny in edges)
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return dist, (min(xs), min(ys), max(xs), max(ys))
+
+
+def paint(w, h, under, layers):
+    """Photo image data, w x h over the colour under: each layer (colour, (distance function, bounds)) laid on in turn,
+    antialiased by its distance. A colour may be a function of y (the Windows step's gradient)."""
+    rows = []
+    for j in range(h):
+        y = j + 0.5
+        row = []
+        for i in range(w):
+            x = i + 0.5
+            color = under
+            for paint_color, (dist, (x0, y0, x1, y1)) in layers:
+                if x < x0 - 1 or x > x1 + 1 or y < y0 - 1 or y > y1 + 1:
+                    continue
+                cover = 0.5 - dist(x, y)
+                if cover > 0:
+                    color = mix(paint_color(y) if callable(paint_color) else paint_color, color, min(cover, 1.0))
+            row.append(color)
+        rows.append("{%s}" % " ".join(row))
+    return " ".join(rows)
+
+
+def framed(w, h, r, fill, line, width):
+    """the layers of a rounded box: its edge, and its fill inside it"""
+    layers = [(line, box(0, 0, w, h, r))] if line and width else []
+    return layers + [(fill, box(width, width, w - 2 * width, h - 2 * width, max(r - width, 0)) if line and width else
+                      box(0, 0, w, h, r))]
+
+
 def _arg(name):
     args = sys.argv[1:]
     if name in args:
@@ -157,7 +310,8 @@ class Builder(tk.Tk):
         super().__init__()
         self.title("Hookshot Builder")
         self.apply_scale()
-        self.minsize(self.px(620), self.px(420))
+        self.apply_theme()
+        self.minsize(self.px(760), self.px(520))
         self.cfg = load_config()
         self.proc = None
         self.lines = queue.Queue()
@@ -169,6 +323,7 @@ class Builder(tk.Tk):
         self.mode = "build"
         self.latest = None
         self.source_picked = False
+        self.dlss_toggled = False
         self.tools = linux_update.tools_tag(linux_update.running_root() or ROOT)
         self.status = tk.StringVar()
         self.kind = tk.StringVar(value=self.cfg.get("kind", "nup"))
@@ -180,11 +335,11 @@ class Builder(tk.Tk):
         code = self.cfg.get("language", "en-US")
         self.language = tk.StringVar(value=dict(make_game.LANGUAGES).get(code, names[0]))
         self.prepare = tk.BooleanVar(value=self.cfg.get("prepare", "1") != "0")   # (make_game.py's last step: off, at the first start)
+        self.dlss = tk.BooleanVar(value=self.cfg.get("dlss", "0") == "1")
         self.check_text = tk.StringVar()
         self.space_text = tk.StringVar()
         self.stage_text = tk.StringVar()
         self.time_text = tk.StringVar()
-        self.pad = {"padx": self.px(12), "pady": self.px(4)}
         self.page = None
         self.build_button = None
         if update is not None:
@@ -212,60 +367,362 @@ class Builder(tk.Tk):
     def px(self, n):
         return int(round(n * self.scale))
 
+    # ---- the look (the colours and images above, as ttk styles) ----
+    def apply_theme(self):
+        px = self.px
+        self.images = {}
+        self.configure(background=PAGE)
+        families = {name.lower(): name for name in self.tk.splitlist(self.tk.call("font", "families"))}
+        ui = next((families[n.lower()] for n in UI_FONTS if n.lower() in families), None)
+        mono = next((families[n.lower()] for n in MONO_FONTS if n.lower() in families), None)
+        named = set(self.tk.splitlist(self.tk.call("font", "names")))
+
+        def font(name, size, weight="normal", family=ui):
+            options = ["-size", -px(size), "-weight", weight] + (["-family", family] if family else [])
+            self.tk.call("font", "configure" if name in named else "create", name, *options)
+        for name, size, weight in (("HsUi", 14, "normal"), ("HsStrong", 14, "bold"), ("HsNote", 13, "normal"),
+                                   ("HsNoteStrong", 13, "bold"), ("HsSmall", 12, "normal"), ("HsLabel", 12, "bold"),
+                                   ("HsBrand", 15, "bold"), ("HsTitle", 24, "bold"), ("HsDisplay", 34, "bold"),
+                                   ("HsPlay", 16, "bold"), ("TkDefaultFont", 13, "normal"), ("TkTextFont", 13, "normal"),
+                                   ("TkMenuFont", 13, "normal"), ("TkHeadingFont", 13, "bold"), ("TkCaptionFont", 14, "bold")):
+            font(name, size, weight)
+        font("HsMono", 12, family=mono)
+        font("HsLog", 11, family=mono)
+        if mono:
+            font("TkFixedFont", 12, family=mono)
+
+        # (the classic widgets and dialogs: the file chooser, the DLSS license's question, the language list)
+        for pattern, value in (("*Background", PAGE), ("*Foreground", INK), ("*selectBackground", BRAND),
+                               ("*selectForeground", WHITE), ("*insertBackground", INK), ("*highlightBackground", PAGE),
+                               ("*highlightColor", BRAND), ("*activeBackground", RAISED_HOVER), ("*activeForeground", INK),
+                               ("*troughColor", TRACK), ("*Dialog.msg.font", "HsUi"),
+                               ("*Dialog.msg.wrapLength", px(460)), ("*Dialog.dtl.font", "HsNote"),
+                               ("*TCombobox*Listbox.background", RAISED), ("*TCombobox*Listbox.foreground", INK),
+                               ("*TCombobox*Listbox.selectBackground", RAISED_HOVER),
+                               ("*TCombobox*Listbox.selectForeground", BRAND_INK), ("*TCombobox*Listbox.font", "HsNote"),
+                               ("*TCombobox*Listbox.borderWidth", 0), ("*TCombobox*Listbox.highlightThickness", 0),
+                               ("*TCombobox*Listbox.relief", "flat")):
+            self.option_add(pattern, value)
+
+        s = self.style = ttk.Style(self)
+        s.theme_use("clam")
+        s.configure(".", background=PAGE, foreground=INK, font="HsUi", bordercolor=QUIET_LINE, lightcolor=PAGE,
+                    darkcolor=PAGE, troughcolor=TRACK, focuscolor=BRAND, selectbackground=BRAND, selectforeground=WHITE,
+                    fieldbackground=GLASS, insertcolor=INK, arrowcolor=INK_SOFT, borderwidth=0)
+        s.map(".", foreground=[("disabled", INK_FAINT)], background=[("disabled", PAGE)])
+        for name, options in (("TFrame", {}), ("Card.TFrame", {"background": GLASS}),
+                              ("TLabel", {}), ("Title.TLabel", {"font": "HsTitle"}), ("Display.TLabel", {"font": "HsDisplay"}),
+                              ("Sub.TLabel", {"foreground": INK_SOFT}), ("Note.TLabel", {"foreground": INK_SOFT, "font": "HsNote"}),
+                              ("Small.TLabel", {"foreground": INK_SOFT, "font": "HsSmall"}),
+                              ("Faint.TLabel", {"foreground": INK_FAINT, "font": "HsSmall"}),
+                              ("Section.TLabel", {"foreground": INK_SOFT, "font": "HsLabel"}),
+                              ("Status.TLabel", {"foreground": BRAND_INK, "font": "HsNote"}),
+                              ("Stage.TLabel", {"background": GLASS, "font": "HsStrong"}),
+                              ("Bad.Stage.TLabel", {"foreground": BAD}), ("Go.Stage.TLabel", {"foreground": GO}),
+                              ("Card.Note.TLabel", {"background": GLASS})):
+            s.configure(name, **options)
+
+        # buttons: Quiet (also every plain ttk button, the dialogs' among them), Primary (blue: the step's action), Go (green: Play)
+        def button(style, fill, hover, line, hover_line, focus_line, foreground, font, padding, radius=8, disabled=None):
+            r, w = px(radius), px(1)
+            n = 2 * r + 6
+            image = {k: self.photo("%s-%s" % (style, k), n, n, PAGE, framed(n, n, r, f, l, w))
+                     for k, f, l in (("normal", fill, line), ("hover", hover, hover_line), ("focus", fill, focus_line),
+                                     ("disabled", disabled or fill, disabled or line))}
+            s.element_create(style + ".box", "image", image["normal"], ("disabled", image["disabled"]),
+                             ("pressed", image["hover"]), ("active", image["hover"]), ("focus", image["focus"]),
+                             border=r + 2, padding=0, sticky="nsew")
+            s.layout(style + ".TButton", [(style + ".box", {"sticky": "nsew", "children": [
+                ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
+            s.configure(style + ".TButton", foreground=foreground, font=font, padding=padding, anchor="center", background=fill)
+            s.map(style + ".TButton", foreground=[("disabled", INK_FAINT)], background=[("disabled", disabled or fill)])
+        button("Quiet", QUIET, GLASS_LINE, QUIET_LINE, QUIET_HOVER_LINE, BRAND_HOVER, INK, "HsStrong", (px(18), px(6)))
+        button("Primary", BRAND, BRAND_HOVER, mix(WHITE, BRAND, 0x33 / 255), mix(WHITE, BRAND_HOVER, 0x33 / 255),
+               mix(WHITE, BRAND, 0xAA / 255), WHITE, "HsStrong", (px(22), px(6)), disabled=mix(WHITE, PAGE, 0x14 / 255))
+        button("Go", GO, GO_HOVER, mix(WHITE, GO, 0x40 / 255), mix(WHITE, GO_HOVER, 0x40 / 255), mix(WHITE, GO, 0xAA / 255),
+               GO_INK, "HsPlay", (px(30), px(10)), radius=10)
+        s.layout("TButton", s.layout("Quiet.TButton"))
+        s.configure("TButton", **{k: s.lookup("Quiet.TButton", k) for k in ("foreground", "font", "padding", "anchor", "background")})
+        s.map("TButton", foreground=[("disabled", INK_FAINT)])
+        # (a text link: Open the game folder)
+        s.layout("Link.TButton", [("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})])
+        s.configure("Link.TButton", foreground=INK_FAINT, font="HsNoteStrong", padding=0, background=PAGE)
+        s.map("Link.TButton", foreground=[("active", INK)], background=[("active", PAGE)])
+
+        # ticks and the game files' choice (the Windows Tick and DumpRow)
+        b, t = px(18), px(8)
+        for name, under, layers in (
+                ("tick", PAGE, framed(b, b, px(5), PAGE, TICK_LINE, px(1.5))),
+                ("tick-on", PAGE, framed(b, b, px(5), BRAND, BRAND, px(1.5)) +
+                 [(WHITE, stroke([(px(2.5), px(8.5)), (px(6.5), px(12.5)), (px(14.5), px(3.5))], px(2)))]),
+                ("radio", GLASS, [(INK_FAINT, ring(b / 2, b / 2, b / 2, px(2)))]),
+                ("radio-on", GLASS, [(BRAND, ring(b / 2, b / 2, b / 2, px(2))), (BRAND, ring(b / 2, b / 2, px(4), px(4)))])):
+            self.photo(name, b + px(14 if name.startswith("radio") else 8), b, under, layers)
+        s.element_create("Hs.tick", "image", self.images["tick"], ("selected", self.images["tick-on"]), sticky="w")
+        s.element_create("Hs.radio", "image", self.images["radio"], ("selected", self.images["radio-on"]), sticky="w")
+        s.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nsew", "children": [
+            ("Hs.tick", {"side": "left", "sticky": ""}), ("Checkbutton.label", {"side": "left", "sticky": "nsew"})]})])
+        s.configure("TCheckbutton", foreground=INK, font="HsNote", padding=(0, px(2)))
+        s.map("TCheckbutton", background=[("active", PAGE)], foreground=[("active", WHITE)])
+        s.layout("Row.TRadiobutton", [("Radiobutton.padding", {"sticky": "nsew", "children": [
+            ("Hs.radio", {"side": "left", "sticky": ""}), ("Radiobutton.label", {"side": "left", "sticky": "nsew"})]})])
+        s.configure("Row.TRadiobutton", background=GLASS, foreground=INK, font="HsUi", padding=(px(16), px(13)))
+        s.map("Row.TRadiobutton", background=[("active", GLASS)], foreground=[("active", WHITE)])
+
+        # fields: the paths (monospaced, as on Windows) and the language
+        r, w, n = px(8), px(1), px(8) * 2 + 6
+        field = self.photo("field", n, n, PAGE, framed(n, n, r, GLASS, GLASS_LINE, w))
+        field_hover = self.photo("field-hover", n, n, PAGE, framed(n, n, r, GLASS, QUIET_HOVER_LINE, w))
+        field_focus = self.photo("field-focus", n, n, PAGE, framed(n, n, r, GLASS, BRAND, w))
+        s.element_create("Hs.field", "image", field, ("focus", field_focus), ("hover", field_hover), border=r + 2, padding=0,
+                         sticky="nsew")
+        s.layout("TEntry", [("Hs.field", {"sticky": "nsew", "children": [
+            ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
+        s.configure("TEntry", foreground=INK_SOFT, padding=(px(12), px(8)), fieldbackground=GLASS, insertwidth=max(1, px(1)))
+        chevron = self.photo("chevron", px(8 + 14), px(8), GLASS,
+                             [(INK_SOFT, stroke([(px(1), px(2)), (px(5), px(6)), (px(9), px(2))], px(1.4)))])
+        s.element_create("Hs.chevron", "image", chevron, sticky="")
+        s.layout("TCombobox", [("Hs.field", {"sticky": "nsew", "children": [
+            ("Hs.chevron", {"side": "right", "sticky": ""}),
+            ("Combobox.padding", {"sticky": "nsew", "children": [("Combobox.textarea", {"sticky": "nsew"})]})]})])
+        s.configure("TCombobox", foreground=INK, padding=(px(12), px(7), px(4), px(7)), arrowsize=px(12))
+        s.map("TCombobox", fieldbackground=[("readonly", GLASS)], foreground=[("readonly", INK)],
+              selectbackground=[("readonly", GLASS)], selectforeground=[("readonly", INK)])
+        s.configure("ComboboxPopdownFrame", background=RAISED, bordercolor=LINE_STRONG, relief="solid", borderwidth=1)
+
+        # cards (the found list's, the build's steps on Windows)
+        r, n = px(10), px(10) * 2 + 6
+        self.photo("card", n, n, PAGE, framed(n, n, r, GLASS, GLASS_LINE, px(1)))
+        s.element_create("Hs.card", "image", self.images["card"], border=r + 2, padding=0, sticky="nsew")
+        s.layout("Card.TFrame", [("Hs.card", {"sticky": "nsew", "children": [("Frame.padding", {"sticky": "nsew"})]})])
+
+        # bars: the free space (green, red when short) and a step's progress (blue), 6 px and round
+        h = max(4, px(6))
+        # (the parts' names end in trough and pbar: the progress bar finds the part it sizes by that name)
+        for name, under, color in (("HsTrack.trough", PAGE, TRACK), ("HsGo.pbar", PAGE, GO), ("HsBad.pbar", PAGE, BAD),
+                                   ("HsCardTrack.trough", GLASS, mix(WHITE, GLASS, 0x12 / 255)), ("HsCard.pbar", GLASS, BRAND)):
+            self.photo(name, h + 4, h, under, [(color, box(0, 0, h + 4, h, h / 2))])
+            s.element_create(name, "image", self.images[name], border=(h // 2 + 1, 0), padding=0, sticky="nsew")
+        for style, track in (("Go", "HsTrack"), ("Bad", "HsTrack"), ("Card", "HsCardTrack")):
+            s.layout(style + ".Horizontal.TProgressbar", [(track + ".trough", {"sticky": "nsew", "children": [
+                ("Hs%s.pbar" % style, {"side": "left", "sticky": "ns"})]})])
+            s.configure(style + ".Horizontal.TProgressbar", thickness=h, background=GLASS)
+
+        # the log's scroll bar: a thumb on the log, no arrows
+        s.layout("Log.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nsew"})]})])
+        s.configure("Log.Vertical.TScrollbar", troughcolor=LOG, background=RAISED_HOVER, bordercolor=LOG, lightcolor=RAISED_HOVER,
+                    darkcolor=RAISED_HOVER, gripcount=0, arrowsize=px(10))
+        s.map("Log.Vertical.TScrollbar", background=[("active", LINE_STRONG)], lightcolor=[("active", LINE_STRONG)],
+              darkcolor=[("active", LINE_STRONG)])
+
+        # Play's triangle, and the hookshot of the window's head
+        self.photo("play", px(11) + px(10), px(14), GO,
+                   [(GO_INK, triangle([(px(0.5), px(0.5)), (px(11), px(7)), (px(0.5), px(13.5))]))])
+        self.load_logo(px(28))
+
+    def photo(self, name, w, h, under, layers):
+        image = tk.PhotoImage(master=self, width=int(w), height=int(h))
+        image.put(paint(int(w), int(h), under, layers))
+        self.images[name] = image
+        return image
+
+    def load_logo(self, size):
+        """assets/hookshot.png (the Windows head's and the game's icon), size pixels wide over the page: averaged down with its
+        alpha on Tk 9, every nth pixel on an older Tk"""
+        self.images["logo"] = None
+        path = os.path.join(ROOT, "assets", "hookshot.png")
+        try:
+            full = tk.PhotoImage(master=self, file=path)
+        except (tk.TclError, OSError):
+            return
+        w, h = full.width(), full.height()
+        try:
+            rows = [self.tk.splitlist(row) for row in
+                    self.tk.splitlist(self.tk.call(full, "data", "-format", "default -colorformat rgba"))]
+        except tk.TclError:
+            self.images["logo"] = full.subsample(max(1, w // size))
+            return
+        tw, th = size, max(1, round(h * size / w))
+        page = [int(PAGE[i:i + 2], 16) for i in (1, 3, 5)]
+        out = []
+        for j in range(th):
+            y0, y1 = j * h // th, max(j * h // th + 1, (j + 1) * h // th)
+            line = []
+            for i in range(tw):
+                x0, x1 = i * w // tw, max(i * w // tw + 1, (i + 1) * w // tw)
+                acc, n = [0.0, 0.0, 0.0, 0.0], 0
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        v = int(rows[y][x][1:], 16)
+                        a = (v & 255) / 255
+                        acc[0] += (v >> 24 & 255) * a
+                        acc[1] += (v >> 16 & 255) * a
+                        acc[2] += (v >> 8 & 255) * a
+                        acc[3] += a
+                        n += 1
+                alpha = acc[3] / n
+                line.append("#%02x%02x%02x" % tuple(min(255, round(acc[k] / n + page[k] * (1 - alpha))) for k in range(3)))
+            out.append("{%s}" % " ".join(line))
+        logo = tk.PhotoImage(master=self, width=tw, height=th)
+        logo.put(" ".join(out))
+        self.images["logo"] = logo
+
+    def header(self, parent, step=None, chip=None):
+        """the window's head, as Windows draws it: the hookshot and Hookshot at the left, and in the middle the steps (Game files >
+        Build > Play) or, for the launcher, the game's version"""
+        px = self.px
+        canvas = tk.Canvas(parent, height=px(64), background=PAGE, highlightthickness=0, borderwidth=0)
+        canvas.pack(fill="x")
+        x = px(28)
+        if self.images.get("logo") is not None:
+            canvas.create_image(x, px(32), image=self.images["logo"], anchor="w")
+            x += self.images["logo"].width() + px(10)
+        canvas.create_text(x, px(32), text="Hookshot", font="HsBrand", fill=INK, anchor="w")
+        x += int(self.tk.call("font", "measure", "HsBrand", "Hookshot"))
+        if chip:
+            canvas.create_text(x + px(12), px(32), text=chip, font="HsSmall", fill=INK_SOFT, anchor="w")
+        self.header_canvas = canvas
+        if step is not None:
+            self.set_step(step)
+            canvas.bind("<Configure>", lambda event: self.center_steps(event.width))
+        return canvas
+
+    def set_step(self, step):
+        canvas = getattr(self, "header_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("steps")
+        pill, labels = self.step_pill(step)
+        canvas.create_image(0, self.px(12), image=pill, anchor="nw", tags=("steps", "pill"))
+        for lx, text, font, color in labels:
+            canvas.create_text(lx, self.px(32), text=text, font=font, fill=color, anchor="w", tags="steps")
+        self.center_steps(canvas.winfo_width())
+
+    def center_steps(self, width):
+        canvas = self.header_canvas
+        pill = canvas.bbox("pill")
+        if pill and width > 1:
+            canvas.move("steps", (width - (pill[2] - pill[0])) // 2 - pill[0], 0)
+
+    def step_pill(self, on):
+        """Windows' SetStep: the steps in a pill, the one now in blue, the ones done with a green tick. One image (the shapes),
+        and the labels with their x, for the canvas to write over it"""
+        px = self.px
+        names = ("Game files", "Build", "Play")
+        container = mix(WHITE, PAGE, 0x0B / 255)
+        layers, labels = [], []
+        x = px(4)
+        for i, name in enumerate(names):
+            if i:
+                layers.append((mix(INK_SOFT, container, 0.45), stroke([(x + px(5), px(16)), (x + px(9), px(20)), (x + px(5), px(24))], px(1.6))))
+                x += px(14)
+            font = "HsNoteStrong" if i == on else "HsNote"
+            width = int(self.tk.call("font", "measure", font, name))
+            done = i < on
+            pill_w = (px(4) + px(22) + px(8) if done else px(14)) + width + px(14)
+            if i == on:
+                layers.append((lambda y: mix("#3557d6", "#4b70f0", min(1, max(0, (y - px(5)) / px(30)))),
+                               box(x, px(5), pill_w, px(30), px(15))))
+            if done:
+                cx, cy = x + px(4) + px(11), px(20)
+                layers.append((mix(GO, container, 0x26 / 255), box(cx - px(11), cy - px(11), px(22), px(22), px(11))))
+                layers.append((GO, stroke([(cx - px(5), cy), (cx - px(1.5), cy + px(3.5)), (cx + px(5), cy - px(3.5))], px(1.8))))
+            text_x = x + (px(4) + px(22) + px(8) if done else px(14))
+            labels.append((text_x, name, font, WHITE if i == on else INK_SOFT if done else INK_FAINT))
+            x += pill_w
+        width = x + px(4)
+        image = self.photo("steps-%d" % on, width, px(40), PAGE,
+                           framed(width, px(40), px(20), container, GLASS_LINE, px(1)) + layers)
+        return image, labels
+
+    def section(self, parent, text, row, column=0, columnspan=1, top=24):
+        """the Windows builder's section labels: FOUND ON THIS PC, INSTALL THE GAME TO"""
+        label = ttk.Label(parent, text=text.upper(), style="Section.TLabel")
+        label.grid(row=row, column=column, columnspan=columnspan, sticky="w", pady=(self.px(top), self.px(10)))
+        return label
+
     # ---- the form ----
     def show_form(self):
         self.title("Hookshot Builder")
         if self.page:
             self.page.destroy()
-        f = self.page = ttk.Frame(self)
-        f.pack(fill="both", expand=True, pady=self.px(8))
-        f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Hookshot", font=("TkDefaultFont", 16, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", **self.pad)
-        ttk.Label(f, text="Turns your own copy of Ocarina of Time into a game folder you can start on PC.").grid(
-            row=1, column=0, columnspan=3, sticky="w", **self.pad)
+        px = self.px
+        page = self.page = ttk.Frame(self)
+        page.pack(fill="both", expand=True)
+        self.header(page, step=0)
+        f = ttk.Frame(page, padding=(px(48), px(6), px(48), px(28)))
+        f.pack(fill="both", expand=True)
+        f.columnconfigure(0, weight=1, minsize=px(580))   # (every page px(800) wide: the window keeps its width, as on Windows)
+        f.columnconfigure(1, minsize=px(20))
+        f.columnconfigure(2, minsize=px(200))
+        ttk.Label(f, text="Build your game", style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, text="Pick your game files and where the game goes. Hookshot does the rest, once.", style="Sub.TLabel",
+                  wraplength=px(800)).grid(row=1, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
         if game_ready(self.cfg.get("out")):
             ttk.Button(f, text="Play the game built in %s" % self.cfg["out"], command=lambda: self.play_and_close(self.cfg["out"])).grid(
-                row=2, column=0, columnspan=3, sticky="we", **self.pad)
-        ttk.Label(f, text="Game files", font=("TkDefaultFont", 10, "bold")).grid(row=3, column=0, sticky="w", **self.pad)
-        kinds = ttk.Frame(f)
-        kinds.grid(row=3, column=1, columnspan=2, sticky="w")
-        ttk.Radiobutton(kinds, text=".nup file", value="nup", variable=self.kind, command=self.show_form).pack(side="left")
-        ttk.Radiobutton(kinds, text="romfs and exefs", value="folders", variable=self.kind, command=self.show_form).pack(side="left", padx=self.px(12))
-        row = 4
+                row=2, column=0, columnspan=3, sticky="w", pady=(px(16), 0))
+        self.section(f, "Game files", 3, columnspan=3)
+        kinds = ttk.Frame(f, style="Card.TFrame", padding=px(5))
+        kinds.grid(row=4, column=0, columnspan=3, sticky="we")
+        kinds.columnconfigure(0, weight=1)
+        ttk.Radiobutton(kinds, text=".nup file", value="nup", variable=self.kind, command=self.show_form,
+                        style="Row.TRadiobutton", cursor="hand2").grid(row=0, column=0, sticky="we")
+        tk.Frame(kinds, height=max(1, px(1)), background=GLASS_LINE).grid(row=1, column=0, sticky="we", padx=px(12))
+        ttk.Radiobutton(kinds, text="romfs and exefs folders", value="folders", variable=self.kind, command=self.show_form,
+                        style="Row.TRadiobutton", cursor="hand2").grid(row=2, column=0, sticky="we")
+        paths = ttk.Frame(f)
+        paths.grid(row=5, column=0, columnspan=3, sticky="we", pady=(px(10), 0))
+        paths.columnconfigure(1, weight=1)
         if self.kind.get() == "nup":
-            self.path_row(f, row, ".nup file", self.nup, lambda: self.pick_file(self.nup))
+            self.path_row(paths, 0, ".nup file", self.nup, lambda: self.pick_file(self.nup))
         else:
-            self.path_row(f, row, "romfs", self.romfs, lambda: self.pick_dir(self.romfs))
-            row += 1
-            self.path_row(f, row, "exefs", self.exefs, lambda: self.pick_dir(self.exefs))
-        row += 1
-        ttk.Label(f, textvariable=self.check_text, wraplength=self.px(560)).grid(row=row, column=0, columnspan=3, sticky="w", **self.pad)
-        row += 1
-        self.path_row(f, row, "Save the game to", self.out, lambda: self.pick_dir(self.out))
-        row += 1
-        ttk.Label(f, text="Language").grid(row=row, column=0, sticky="w", **self.pad)
-        ttk.Combobox(f, textvariable=self.language, values=[n for _, n in make_game.LANGUAGES], state="readonly").grid(
-            row=row, column=1, sticky="w", **self.pad)
-        row += 1
-        ttk.Checkbutton(f, text="Prepare shaders now (unticked: at the game's first start, behind a black window)",
-                        variable=self.prepare).grid(row=row, column=0, columnspan=3, sticky="w", **self.pad)
-        row += 1
-        ttk.Label(f, text="Takes about 45 minutes and needs 45 GB.").grid(row=row, column=0, columnspan=3, sticky="w", **self.pad)
-        row += 1
-        ttk.Label(f, textvariable=self.space_text).grid(row=row, column=0, columnspan=3, sticky="w", **self.pad)
-        row += 1
-        ttk.Label(f, textvariable=self.status, wraplength=self.px(560)).grid(row=row, column=0, columnspan=3, sticky="w", **self.pad)
-        row += 1
-        self.build_button = ttk.Button(f, text="Build", command=self.build)
-        self.build_button.grid(row=row, column=0, columnspan=3, sticky="we", padx=self.px(12), pady=self.px(12))
+            self.path_row(paths, 0, "romfs", self.romfs, lambda: self.pick_dir(self.romfs))
+            self.path_row(paths, 1, "exefs", self.exefs, lambda: self.pick_dir(self.exefs))
+        ttk.Label(f, textvariable=self.check_text, style="Small.TLabel", wraplength=px(800)).grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
+
+        self.section(f, "Install the game to", 7, top=18)
+        self.section(f, "Game language", 7, column=2, top=18)
+        out = ttk.Frame(f)
+        out.grid(row=8, column=0, sticky="we")
+        out.columnconfigure(1, weight=1)
+        self.path_row(out, 0, None, self.out, lambda: self.pick_dir(self.out), button="Change")
+        ttk.Combobox(f, textvariable=self.language, values=[n for _, n in make_game.LANGUAGES], state="readonly",
+                     font="HsNote", cursor="hand2").grid(row=8, column=2, sticky="we")
+
+        options = ttk.Frame(f)
+        options.grid(row=9, column=0, columnspan=3, sticky="we", pady=(px(22), 0))
+        ttk.Checkbutton(options, text="Prepare shaders now", variable=self.prepare, cursor="hand2").pack(anchor="w")
+        ttk.Label(options, text="A few minutes at the end of the build. Unticked, the game prepares them at its first start, "
+                  "behind a black window.", style="Small.TLabel", wraplength=px(660)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
+        ttk.Checkbutton(options, text="NVIDIA DLSS (downloads NVIDIA's SDK under NVIDIA's license)", variable=self.dlss,
+                        command=self.on_dlss_changed, cursor="hand2").pack(anchor="w", pady=(px(12), 0))
+        ttk.Label(options, text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them.",
+                  style="Small.TLabel", wraplength=px(660)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
+
+        f.rowconfigure(10, weight=1, minsize=px(18))
+        ttk.Label(f, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
+            row=11, column=0, columnspan=3, sticky="w", pady=(0, px(12)))
+        foot = ttk.Frame(f)
+        foot.grid(row=12, column=0, columnspan=3, sticky="we")
+        foot.columnconfigure(1, weight=1)
+        self.space_bar = ttk.Progressbar(foot, maximum=1.0, length=px(160), style="Go.Horizontal.TProgressbar")
+        self.space_bar.grid(row=0, column=0)
+        ttk.Label(foot, textvariable=self.space_text, style="Small.TLabel").grid(row=0, column=1, sticky="w", padx=(px(10), 0))
+        self.about_label = ttk.Label(foot, text="About 45 min", style="Faint.TLabel")
+        self.about_label.grid(row=0, column=2, padx=(px(14), px(14)))
+        self.build_button = ttk.Button(foot, text="Build the game", command=self.build, style="Primary.TButton", cursor="hand2")
+        self.build_button.grid(row=0, column=3)
         self.out.trace_add("write", lambda *a: self.update_space())
         self.update_space()
         self.apply_mode()
 
-    def path_row(self, f, row, label, var, browse):
-        ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", **self.pad)
-        ttk.Entry(f, textvariable=var).grid(row=row, column=1, sticky="we", **self.pad)
-        ttk.Button(f, text="Browse", command=browse).grid(row=row, column=2, **self.pad)
+    def path_row(self, f, row, label, var, browse, button="Browse…"):
+        if label:
+            ttk.Label(f, text=label, style="Small.TLabel").grid(row=row, column=0, sticky="w", padx=(0, self.px(12)))
+        ttk.Entry(f, textvariable=var, font="HsMono").grid(row=row, column=1, sticky="we", pady=self.px(3))
+        ttk.Button(f, text=button, command=browse, cursor="hand2").grid(row=row, column=2, padx=(self.px(10), 0), pady=self.px(3))
 
     def pick_file(self, var):
         p = filedialog.askopenfilename(title="Your game's .nup", filetypes=[("Switch 2 game package", "*.nup"), ("All files", "*")])
@@ -286,7 +743,23 @@ class Builder(tk.Tk):
 
     def update_space(self):
         gb = free_gb(self.out.get())
-        self.space_text.set("%s has %.0f GB free." % (self.out.get(), gb) if gb is not None else "")
+        self.space_text.set("Needs 45 GB · %.0f GB free there" % gb if gb is not None else "Needs 45 GB")
+        bar = getattr(self, "space_bar", None)   # (as on Windows: the 45 GB's share of what is free, green when it fits)
+        try:
+            if bar is not None and bar.winfo_exists():
+                bar.configure(value=min(1.0, 45 / max(gb, 0.1)) if gb is not None else 0,
+                              style="Go.Horizontal.TProgressbar" if gb is None or gb >= 45 else "Bad.Horizontal.TProgressbar")
+        except tk.TclError:
+            pass
+        self.apply_mode()
+
+    def on_dlss_changed(self):
+        if self.dlss.get() and not messagebox.askyesno("NVIDIA DLSS", DLSS_LICENSE):
+            self.dlss.set(False)
+        else:
+            self.dlss_toggled = True
+        self.cfg["dlss"] = "1" if self.dlss.get() else "0"
+        save_config(self.cfg)
         self.apply_mode()
 
     def check_version(self):
@@ -318,8 +791,13 @@ class Builder(tk.Tk):
             self.apply_launch()
             return
         folder = self.out.get().strip()
-        game, kept = linux_update.game_version(os.path.expanduser(folder)) if folder else (None, False)
+        expanded = os.path.expanduser(folder) if folder else ""
+        game, kept = linux_update.game_version(expanded) if expanded else (None, False)
         self.mode = linux_update.choose_mode(game, self.tools, self.latest, self.source_picked, kept)
+        dlss_changed = bool(kept and game and not self.source_picked and getattr(self, "dlss_toggled", False) and
+                            hasattr(self, "dlss") and bool(self.dlss.get()) != folder_has_dlss(expanded))
+        if self.mode == "up-to-date" and dlss_changed:
+            self.mode = "update-game"
         button = self.build_button
         if button is None:
             return
@@ -329,9 +807,18 @@ class Builder(tk.Tk):
         except tk.TclError:
             return
         button.configure(text={"update-game": "Update", "up-to-date": "Play", "update-builder": "Update builder",
-                                "build": "Build"}[self.mode])
+                                "build": "Build the game"}[self.mode])
+        about = getattr(self, "about_label", None)   # (Windows: the time only for a build)
+        try:
+            if about is not None and about.winfo_exists():
+                about.configure(text="About 45 min" if self.mode == "build" else "")
+        except tk.TclError:
+            pass
         target = linux_update.update_target(self.latest, self.tools)
-        if self.mode == "update-game":
+        if self.mode == "update-game" and dlss_changed and game == target:
+            self.status.set("Update builds your game again %s NVIDIA DLSS."
+                            % ("with" if self.dlss.get() else "without"))
+        elif self.mode == "update-game":
             self.status.set("Hookshot %s is available. Your game is %s. Update downloads only what changed, then compiles what changed."
                             % (target, game))
         elif self.mode == "up-to-date" and self.latest is None:
@@ -367,18 +854,28 @@ class Builder(tk.Tk):
         if self.page:
             self.page.destroy()
         self.title("Hookshot")
-        f = self.page = ttk.Frame(self)
-        f.pack(fill="both", expand=True, pady=self.px(8))
+        px = self.px
+        page = self.page = ttk.Frame(self)
+        page.pack(fill="both", expand=True)
         game, _kept = linux_update.game_version(folder)
-        ttk.Label(f, text="Hookshot %s" % game if game else "Hookshot", font=("TkDefaultFont", 16, "bold")).pack(anchor="w", **self.pad)
-        ttk.Label(f, text=folder, wraplength=self.px(560)).pack(anchor="w", **self.pad)
+        self.header(page, chip=game)
+        # (the Windows launcher's page: the game's name in the middle, Update beside Play when there is one, the folder below)
+        f = ttk.Frame(page, padding=(px(48), px(24), px(48), px(56)))
+        f.pack(fill="both", expand=True)
+        ttk.Frame(f, width=px(800), height=0).pack()
+        ttk.Label(f, text="THE LEGEND OF ZELDA", style="Section.TLabel").pack()
+        ttk.Label(f, text="Ocarina of Time", style="Display.TLabel").pack(pady=(px(4), 0))
+        ttk.Label(f, text=folder, style="Sub.TLabel", wraplength=px(600), justify="center").pack(pady=(px(8), 0))
         self.launch_status = tk.StringVar(value="Checking for updates...")
-        ttk.Label(f, textvariable=self.launch_status, wraplength=self.px(560)).pack(anchor="w", **self.pad)
+        ttk.Label(f, textvariable=self.launch_status, style="Note.TLabel", wraplength=px(600), justify="center").pack(pady=(px(16), 0))
         buttons = ttk.Frame(f)
-        buttons.pack(anchor="e", **self.pad)
-        self.launch_update = ttk.Button(buttons, text="Update", command=lambda: self.begin_update(folder))
-        ttk.Button(buttons, text="Play", command=lambda: self.play_and_close(folder)).pack(side="right", padx=self.px(4))
-        ttk.Button(buttons, text="Open folder", command=lambda: subprocess.Popen(["xdg-open", folder])).pack(side="right", padx=self.px(4))
+        buttons.pack(pady=(px(28), 0))
+        self.launch_update = ttk.Button(buttons, text="Update", style="Primary.TButton", cursor="hand2",
+                                        command=lambda: self.begin_update(folder))
+        ttk.Button(buttons, text="Play", style="Go.TButton", image=self.images["play"], compound="left", cursor="hand2",
+                   command=lambda: self.play_and_close(folder)).pack(side="right", padx=px(4))
+        ttk.Button(f, text="Open the game folder", style="Link.TButton", cursor="hand2",
+                   command=lambda: subprocess.Popen(["xdg-open", folder])).pack(pady=(px(22), 0))
         self.lookup_latest()
 
     def begin_update(self, folder=None):
@@ -399,7 +896,12 @@ class Builder(tk.Tk):
                         raise RuntimeError("These tools are a source checkout, so they cannot download a release. Start the AppImage to update.")
                     manifest = linux_update.startup_manifest(root)
                     if manifest.tag != linux_update.tools_tag(root):
-                        source = linux_update.read_manifest(root)
+                        # (as Windows does: GitHub's latest list lags right after a publish, and installing it would put
+                        # the release before the one asked for over these tools)
+                        if self.update_tag and manifest.tag != self.update_tag:
+                            raise RuntimeError("GitHub offered %s, not %s: its download links can lag right after a release. "
+                                               "Try Update again in a few minutes." % (manifest.tag, self.update_tag))
+                        source =linux_update.read_manifest(root)
                         apprun = linux_update.install(manifest, root, source, note=lambda message: self.lines.put(("note", message)))
                         for name in ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "LD_LIBRARY_PATH"):
                             os.environ.pop(name, None)
@@ -419,13 +921,14 @@ class Builder(tk.Tk):
             self.status.set("This builder is the latest version.")
             self.lookup_latest()
             return
+        dlss = bool(self.dlss.get()) if getattr(self, "dlss_toggled", False) else folder_has_dlss(folder)
         cmd = [sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py"), "--update", folder] + \
-            ([] if self.prepare.get() else ["--no-prepare-shaders"])   # (as the last build chose)
+            ([] if self.prepare.get() else ["--no-prepare-shaders"]) + dlss_args(dlss)   # (as the last build chose)
         self.heading.configure(text="Updating your game")
         self.stage_text.set("Compiling what changed")
         self.started = time.time()
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                     encoding="utf-8", errors="replace", start_new_session=True)
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, env=make_game_env(dlss), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, bufsize=1, encoding="utf-8", errors="replace", start_new_session=True)
         threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
         self.tick()
 
@@ -464,17 +967,23 @@ class Builder(tk.Tk):
         except ValueError as error:
             return messagebox.showerror("Hookshot", str(error))
         code = next((c for c, n in make_game.LANGUAGES if n == self.language.get()), "en-US")
+        dlss = bool(self.dlss.get()) if hasattr(self, "dlss") else False
         self.cfg.update(kind=self.kind.get(), nup=self.nup.get(), romfs=self.romfs.get(), exefs=self.exefs.get(), out=out, language=code,
-                        prepare="1" if self.prepare.get() else "0")
+                        prepare="1" if self.prepare.get() else "0", **({"dlss": "1" if dlss else "0"} if hasattr(self, "dlss") else {}))
         save_config(self.cfg)
         # (issue 531) Without HOOKSHOT_JOBS or RX_JOBS, make_game chooses as on Windows, from the memory free now; this window chose
         # fewer, 80% of the total memory at 3.5 GB each, and the CPU sat at 29%
         cmd = [sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py")] + src + ["--out", out, "--language", code] + \
-            ([] if jobs is None else ["--jobs", str(jobs)]) + ([] if self.prepare.get() else ["--no-prepare-shaders"])
+            ([] if jobs is None else ["--jobs", str(jobs)]) + ([] if self.prepare.get() else ["--no-prepare-shaders"]) + \
+            (dlss_args(True) if dlss else [])
+        slow = slow_disk_warning(out)   # (a warning, not a stop: a hard drive still builds, only much slower)
+        if slow is not None and not messagebox.askokcancel("Hookshot", slow):
+            return
         self.show_progress()
         self.started = time.time()
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                     encoding="utf-8", errors="replace", start_new_session=True)
+        env_kw = {"env": make_game_env(dlss)} if (dlss or "HOOKSHOT_NGX_SDK" in os.environ) else {}
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, bufsize=1, encoding="utf-8", errors="replace", start_new_session=True, **env_kw)
         threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
 
     def read(self, proc):
@@ -482,7 +991,7 @@ class Builder(tk.Tk):
             self.lines.put(("line", line.rstrip("\n")))
         self.lines.put(("exit", proc.wait()))
 
-    def show_progress(self, title="Building"):
+    def show_progress(self, title="Building your game"):
         if self.page:
             self.page.destroy()
         self.changed, self.compiled_files = -1, 0
@@ -490,22 +999,42 @@ class Builder(tk.Tk):
         self.compile_started = None
         self.times = None
         self.shaders_later = False
-        f = self.page = ttk.Frame(self)
-        f.pack(fill="both", expand=True, pady=self.px(8))
-        f.columnconfigure(0, weight=1)
-        f.rowconfigure(5, weight=1)
-        self.heading = ttk.Label(f, text=title, font=("TkDefaultFont", 16, "bold"))
-        self.heading.grid(row=0, column=0, sticky="w", **self.pad)
-        ttk.Label(f, text="This takes a while, and your PC stays usable.").grid(row=1, column=0, sticky="w", **self.pad)
-        ttk.Label(f, textvariable=self.stage_text).grid(row=2, column=0, sticky="w", **self.pad)
-        self.bar = ttk.Progressbar(f, maximum=1.0, mode="determinate")
-        self.bar.grid(row=3, column=0, sticky="we", **self.pad)
-        ttk.Label(f, textvariable=self.time_text).grid(row=4, column=0, sticky="w", **self.pad)
-        self.log = tk.Text(f, height=12, wrap="none", font=("TkFixedFont", 9))
-        self.log.grid(row=5, column=0, sticky="nsew", **self.pad)
+        px = self.px
+        page = self.page = ttk.Frame(self)
+        page.pack(fill="both", expand=True)
+        self.header(page, step=1)
+        f = ttk.Frame(page, padding=(px(48), px(6), px(48), px(28)))
+        f.pack(fill="both", expand=True)
+        f.columnconfigure(0, weight=1, minsize=px(800))
+        f.rowconfigure(3, weight=1)
+        self.heading = ttk.Label(f, text=title, style="Title.TLabel")
+        self.heading.grid(row=0, column=0, sticky="w")
+        ttk.Label(f, text="This takes a while, and your PC stays usable.", style="Sub.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(px(6), 0))
+        # (the step, its bar and the clock in a card, as Windows' steps; the lines make_game.py prints below it)
+        card = ttk.Frame(f, style="Card.TFrame", padding=(px(20), px(16)))
+        card.grid(row=2, column=0, sticky="we", pady=(px(22), px(14)))
+        card.columnconfigure(0, weight=1)
+        self.stage_label = ttk.Label(card, textvariable=self.stage_text, style="Stage.TLabel", wraplength=px(760))
+        self.stage_label.grid(row=0, column=0, sticky="w")
+        self.bar = ttk.Progressbar(card, maximum=1.0, mode="determinate", style="Card.Horizontal.TProgressbar")
+        self.bar.grid(row=1, column=0, sticky="we", pady=(px(12), px(10)))
+        ttk.Label(card, textvariable=self.time_text, style="Card.Note.TLabel").grid(row=2, column=0, sticky="w")
+        lines = tk.Frame(f, background=LOG, highlightthickness=max(1, px(1)), highlightbackground=GLASS_LINE,
+                         highlightcolor=GLASS_LINE)
+        lines.grid(row=3, column=0, sticky="nsew")
+        lines.columnconfigure(0, weight=1)
+        lines.rowconfigure(0, weight=1)
+        self.log = tk.Text(lines, height=12, wrap="none", font="HsLog", background=LOG, foreground=INK_SOFT,
+                           borderwidth=0, highlightthickness=0, padx=px(10), pady=px(8), insertbackground=INK,
+                           selectbackground=BRAND, selectforeground=WHITE)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(lines, orient="vertical", command=self.log.yview, style="Log.Vertical.TScrollbar")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.log.configure(yscrollcommand=scroll.set)
         self.buttons = ttk.Frame(f)
-        self.buttons.grid(row=6, column=0, sticky="e", **self.pad)
-        ttk.Button(self.buttons, text="Cancel", command=self.cancel).pack(side="right")
+        self.buttons.grid(row=4, column=0, sticky="e", pady=(px(14), 0))
+        ttk.Button(self.buttons, text="Cancel", command=self.cancel, cursor="hand2").pack(side="right")
         self.stage_text.set("Starting")
         self.tick()
 
@@ -541,7 +1070,9 @@ class Builder(tk.Tk):
                     if hasattr(self, "buttons"):
                         for widget in self.buttons.winfo_children():
                             widget.destroy()
-                        ttk.Button(self.buttons, text="Back", command=self.show_form).pack(side="right", padx=self.px(4))
+                        ttk.Button(self.buttons, text="Back", command=self.show_form, cursor="hand2").pack(side="right", padx=self.px(4))
+                    if hasattr(self, "stage_label"):
+                        self.stage_label.configure(style="Bad.Stage.TLabel")
                 elif kind == "line":
                     self.on_line(v)
                 elif kind == "exit":
@@ -627,11 +1158,18 @@ class Builder(tk.Tk):
                 add_to_menu(folder)
             except (OSError, ValueError):   # (no menu entry; the game is built)
                 pass
-            ttk.Button(self.buttons, text="Play", command=lambda: self.play_and_close(folder)).pack(side="right", padx=self.px(4))
-            ttk.Button(self.buttons, text="Open folder", command=lambda: subprocess.Popen(["xdg-open", folder])).pack(side="right", padx=self.px(4))
+            ttk.Button(self.buttons, text="Play", style="Go.TButton", image=self.images["play"], compound="left", cursor="hand2",
+                       command=lambda: self.play_and_close(folder)).pack(side="right", padx=self.px(4))
+            ttk.Button(self.buttons, text="Open folder", cursor="hand2",
+                       command=lambda: subprocess.Popen(["xdg-open", folder])).pack(side="right", padx=self.px(4))
+            self.heading.configure(text="Your game is ready")
+            self.stage_label.configure(style="Go.Stage.TLabel")
+            self.set_step(2)
         else:
             self.stage_text.set("The build stopped: %s" % getattr(self, "error", "see the lines above"))
-            ttk.Button(self.buttons, text="Back", command=self.show_form).pack(side="right", padx=self.px(4))
+            ttk.Button(self.buttons, text="Back", command=self.show_form, cursor="hand2").pack(side="right", padx=self.px(4))
+            self.heading.configure(text="The build stopped")
+            self.stage_label.configure(style="Bad.Stage.TLabel")
 
     def cancel(self):
         if self.proc and self.proc.poll() is None:

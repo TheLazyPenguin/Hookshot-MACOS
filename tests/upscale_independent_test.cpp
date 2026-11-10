@@ -3,6 +3,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,9 @@
 #include <initializer_list>
 #include <mutex>
 #include <utility>
+#include "vk_present_rect.h"
+using mkwvk::PresentSourceRect;
+using mkwvk::present_source_rect;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
 using VkImage = uint64_t;
 using VkImageView = uint64_t;
@@ -54,11 +58,12 @@ bool pipe_fail = false, sampler_fail = false, image_fail = false;
 uint64_t next_handle = 100;
 uint32_t made_w = 0, made_h = 0, dispatched_w = 0, dispatched_h = 0;
 int made_usage = 0, dispatched_mode = -1;
-float dispatched_sharp = -1;
+float dispatched_sharp = -1, dispatched_x0 = -1, dispatched_x1 = -1;
+int dispatched_side = -1;
 VkImageView sampled_view = 0;
 VkImageBlit last_blit;
 bool make_pipe(Pipe& p, const uint32_t* code, size_t bytes, std::initializer_list<int> types, uint32_t push) {
-    CHECK(code == FG_SCALE_COMP_SPV && bytes == sizeof FG_SCALE_COMP_SPV && types.size() == 2 && push == 8);
+    CHECK(code == FG_SCALE_COMP_SPV && bytes == sizeof FG_SCALE_COMP_SPV && types.size() == 3 && push == 20);
     CHECK(*types.begin() == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && *(types.begin() + 1) == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     ++pipe_calls; p.set = 1; p.layout = 2; p.pipe = pipe_fail ? 0 : 3; return !pipe_fail;
 }
@@ -92,17 +97,19 @@ void vkCmdBlitImage(int, VkImage src, int, VkImage dst, int, int count, const Vk
 }
 void pass(int, const Pipe& p, std::initializer_list<std::pair<VkImageView, VkSampler>> b,
           uint32_t w, uint32_t h, const void* data, uint32_t bytes) {
-    CHECK(p.pipe == 3 && b.size() == 2 && b.begin()->first && b.begin()->second == 4 && bytes == 8);
+    CHECK(p.pipe == 3 && b.size() == 3 && b.begin()->first && b.begin()->second == 4 && bytes == 20);
+    CHECK((b.begin() + 2)->first && (b.begin() + 2)->second == 4);
     CHECK((b.begin() + 1)->first && !(b.begin() + 1)->second);
-    struct PC { int mode; float sharp; } pc;
+    struct PC { int mode; float sharp; float x0, x1; int side; } pc;
     std::memcpy(&pc, data, sizeof pc);
     ++dispatches; dispatched_mode = pc.mode; dispatched_sharp = pc.sharp;
+    dispatched_side = pc.side; dispatched_x0 = pc.x0; dispatched_x1 = pc.x1;
     dispatched_w = w; dispatched_h = h; sampled_view = b.begin()->first;
 }
 void logf(const char*, ...) { CHECK(dispatches > 0); ++logs; }
 // PRODUCTION_FUNCTIONS
 void reset() {
-    scale = {}; fg = {}; opts = {}; dev.push_descriptor = true; vkCmdPushDescriptorSetKHR = true;
+    scale = {}; fg = {}; opts = {}; wide_now = WideSides{}; dev.push_descriptor = true; vkCmdPushDescriptorSetKHR = true;
     pipe_calls = sampler_calls = image_calls = dispatches = blits = waits = flushes = 0;
     destroyed_pipes = destroyed_layouts = destroyed_sets = 0;
     pipe_fail = sampler_fail = image_fail = false;
@@ -132,6 +139,15 @@ int main() {
         opts.upscale = opts.sharpness = 0; CHECK(!draw());
         CHECK(dispatches == 2 && image_calls == 1 && pipe_calls == 1);
     }
+    // (ultrawide's menu sides alone run the pass, with the plain copy, and push the middle 16:9's edges)
+    reset(); wide_now = WideSides{0.25f, 2}; CHECK(draw());
+    CHECK(dispatches == 1 && dispatched_mode == 0 && dispatched_sharp == 0.0f);
+    CHECK(dispatched_side == 2 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
+    wide_now = WideSides{}; CHECK(!draw()); CHECK(dispatches == 1);
+    // (the blurred sides: first the picture at 1/8, then the pass, which reads it)
+    reset(); wide_now = WideSides{0.25f, 1}; CHECK(draw());
+    CHECK(dispatches == 2 && dispatched_side == 1 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
+    CHECK(image_calls == 2);
     reset(); opts.upscale = 1; opts.framegen = std::atoi(std::getenv("RX_VK_FRAMEGEN")) == 0 ? 2 : 0;
     CHECK(!framegen_on()); CHECK(draw()); CHECK(!fg.init && !fg.thread_started);
     reset(); opts.upscale = 1; pipe_fail = true;

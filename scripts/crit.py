@@ -3,8 +3,9 @@ and renderer thread, "<ms> <name>|<frames>" (module+offset, leaf first).
 
     python -I scripts/crit.py work/runs/<run>_all.txt [top]
 
-A thread is running at an instant when its leaf is in hookshot.exe or hookshot_vk.dll (game code, the runtime, the
-renderer), blocked otherwise (the leaf in ntdll, win32u, KERNELBASE, the driver). Prints each thread's running share;
+A thread is running at an instant when its leaf is in hookshot.exe or hookshot_vk.dll (on Linux hookshot or
+hookshot_vk.so: game code, the runtime, the renderer), blocked otherwise (the leaf in ntdll, win32u, KERNELBASE, libc,
+the driver). RX_MAPS=<folder>: another build's linker maps, or on Linux the game folder (its binaries' symbols). Prints each thread's running share;
 then for the instants when no game thread runs (the frame waits on something outside the game's CPU work): what each
 thread waits in and what the renderer's threads do; then for the instants when the main thread is blocked: how many
 game threads run and the functions they are in.
@@ -14,17 +15,13 @@ import collections, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prof  # noqa: E402
 
-RUN_MODS = ("hookshot.exe", "hookshot_vk.dll")
+RUN_MODS = prof.RUN_MODS
 
 
 def main():
     path = sys.argv[1]
     top = int(sys.argv[2]) if len(sys.argv) > 2 else 25
-    maps = {}
-    for mod in RUN_MODS:
-        mp = os.path.join(os.environ.get("RX_MAPS", prof.BUILD), mod[:-4] + ".map")   # (RX_MAPS: another build's maps)
-        if os.path.exists(mp):
-            maps[mod] = prof.load_map(mp, 0x180000000 if mod.endswith(".dll") else 0x140000000)
+    maps = prof.load_symbols()
     cache = {}
 
     def name(frame):
@@ -37,7 +34,7 @@ def main():
             import bisect
             i = bisect.bisect_right(addrs, int(off, 16)) - 1
             if i >= 0:
-                r = mod.split(".")[0] + ":" + prof.demangle(names[i])
+                r = prof.module_name(mod) + ":" + prof.demangle(names[i])
         cache[frame] = r
         return r
 

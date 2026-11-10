@@ -1,8 +1,8 @@
 // (hookshot) AMD FSR 3.1's inputs: the scene's camera and depth, made into colour, depth and motion at the render size by
 // one pass (shaders/fsr3_prep.comp); see vk_fsr3_inputs.h for what comes from #841 and what does not yet.
 //
-// The camera is taken exactly as vk_dlss.cpp's dlss_note_scene_draw takes it, from the draws into the scene's colour target:
-// their vertex stage's uniform buffer 3 holds the target's size at 0x120, this frame's view-projection at 0x30 (row major,
+// The camera is taken exactly as vk_temporal.cpp's temporal_note_scene_draw takes it, from the draws into the scene's
+// colour target: their vertex stage's uniform buffer 3 holds the target's size at 0x120, this frame's view-projection at 0x30 (row major,
 // clip = M * position) and the projection at 0x70, its w row (0, 0, -1, 0) at 0xa0. The jitter the host put on the
 // projection (nx2/oot_jitter.py: P[0][2] and P[1][2]) is read back from it, given to FSR in render pixels and taken off the
 // motion, with dlss_math.h's functions: the same jitter, read the same way, as DLSS's.
@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "dlss_math.h"
+#include "temporal_jitter.h"
 #include "vk_draw.h"   // (descriptors_disturbed)
 #include "vk_fsr3.h"
 #include "vk_fsr3fi.h"
@@ -71,8 +72,7 @@ struct State {
     std::chrono::steady_clock::time_point last_time{};
     Frame frame;              // (the last one prepared: take())
     bool have_frame = false;
-    std::atomic<uint64_t> upscaled_frame{0};   // (the frame FSR's upscaler last drew: jitter_size, on the game's thread)
-    std::atomic<uint32_t> jitter_w{0}, jitter_h{0}, jitter_phases{8};
+    TemporalJitter jitter;
     struct Dead { uint64_t frame; std::function<void()> free; };
     std::vector<Dead> dead;   // (what work in flight may still use: freed a few frames on)
     const char* reason = nullptr;
@@ -183,7 +183,7 @@ bool make_pipeline() {
     return true;
 }
 
-/// A view of a depth texture's depth alone, for sampling (made once per image: vk_dlss.cpp's depth_view)
+/// A view of a depth texture's depth alone, for sampling (made once per image: vk_temporal.cpp's depth_view)
 VkImageView depth_view(Texture* t) {
     State& s = st();
     const uint64_t gen = texture_destroy_generation();
@@ -271,7 +271,7 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
         !make_image(cmd, s.motion, VK_FORMAT_R16G16_SFLOAT, rw, rh))
         return fail("its images were not made");
 
-    const bool reset = !s.last_frame || now - s.last_frame > 2 || s.frame.width != rw || s.frame.height != rh;
+    bool reset = !s.last_frame || now - s.last_frame > 2 || s.frame.width != rw || s.frame.height != rh;
     struct {
         float reproject[16];
         float jitter[2];
@@ -285,6 +285,7 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
     std::memcpy(previous, s.last_vp, sizeof previous);
     dlss_math::unjitter(previous, s.last_jitter);
     const bool motion = !reset && dlss_math::reprojection(cam.current, previous, pc.reproject);
+    if (!motion) reset = true;   // (without a valid reprojection, prior history has no mapping to this camera)
     pc.jitter[0] = cam.jitter[0], pc.jitter[1] = cam.jitter[1];
     pc.size[0] = (int32_t)rw, pc.size[1] = (int32_t)rh;
     pc.flags = (motion ? 1 : 0) | (camera.flip_depth ? 2 : 0);
@@ -350,18 +351,20 @@ bool take(Frame& out) {
 
 void upscaled(uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh) {
     State& s = st();
-    s.jitter_w = rw, s.jitter_h = rh, s.jitter_phases = (uint32_t)dlss_jitter_phases(rw, rh, dw, dh);
-    s.upscaled_frame = texture_frame_no();
+    s.jitter.publish(rw, rh, (uint32_t)dlss_jitter_phases(rw, rh, dw, dh), texture_frame_no());
 }
 
-uint32_t jitter_size(int axis) {
+MkwVkJitter jitter_sample() {
     // (RX_VK_FSR_JITTER=0: none. 0 too once FSR has not drawn for a while: the camera as the game has it)
     static const bool off = env_switch("RX_VK_FSR_JITTER") == 0;
     State& s = st();
-    const uint64_t last = s.upscaled_frame.load(std::memory_order_relaxed);
-    if (off || !last || texture_frame_no() - last > 30 || !fsr3_wanted()) return 0;
-    if (axis == 2) return s.jitter_phases.load(std::memory_order_relaxed);
-    return axis ? s.jitter_h.load(std::memory_order_relaxed) : s.jitter_w.load(std::memory_order_relaxed);
+    if (off || !fsr3_wanted()) return {};
+    return s.jitter.read(texture_frame_no());
+}
+
+uint32_t jitter_size(int axis) {
+    const MkwVkJitter sample = jitter_sample();
+    return axis == 2 ? sample.phases : axis ? sample.height : sample.width;
 }
 
 } // namespace mkwvk::fsr3_inputs

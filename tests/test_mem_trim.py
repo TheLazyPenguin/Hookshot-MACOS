@@ -44,7 +44,7 @@ def main():
     tex = (ROOT / "gpu/vk/vk_texture.cpp").read_text(encoding="utf-8")
     astc = block(tex, "bool upload_astc_gpu(")
     copy = block(tex, "bool texture_copy_into_bc(")
-    need("if (!bc_scratch_layout(cmd, tex.bc_resized)) return false;" in astc,
+    need("if (!bc_scratch_layout(cmd, tex.bc_resized))" in astc,   # (its failure also names the cause: test_bc_upload_retry)
          "an ASTC upload does not check scratch allocation with its resize mode")
     need("if (!bc_scratch_layout(cmd, dst->bc_resized)) return false;" in copy,
          "a BC3 copy does not check scratch allocation with its destination resize mode")

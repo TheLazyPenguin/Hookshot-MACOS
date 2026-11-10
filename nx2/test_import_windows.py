@@ -8,6 +8,8 @@ import argparse,os
 from pathlib import Path
 import subprocess,tempfile
 
+RUN_ALL_ARGS = ["--cxx", "g++"]
+
 ROOT=Path(__file__).resolve().parents[1]
 def block(text,marker):
     start=text.index(marker);end=text.index('{',start)+1;depth=1

@@ -2,15 +2,16 @@
 // interpolation (vk_fsr3fi.h) are given besides the picture, in one place, so they can move onto the renderer's shared
 // temporal inputs (#1008) by changing this file alone.
 //
-// What comes from #841 (NVIDIA DLSS's own inputs) and what does not yet:
+// What comes from #841 (NVIDIA DLSS's own inputs, now vk_temporal.cpp: the frame chain DLSS and FSR 4 share) and what does
+// not yet:
 //  - the camera jitter: #841's, the one jitter in the game (nx2/oot_jitter.py, host/rx_backend.c hos_dlss_jitter_clip),
-//    switched on for FSR by jitter_size() as vk_dlss.cpp's dlss_jitter_size switches it on for DLSS, and read back here from
-//    the camera's uniform buffer as vk_dlss.cpp reads it;
-//  - the camera: the same uniform buffer and the same checks as vk_dlss.cpp's dlss_note_scene_draw; the near plane and the
+//    switched on for FSR by jitter_size() as vk_temporal.cpp's temporal_jitter_size switches it on for DLSS and FSR 4, and
+//    read back here from the camera's uniform buffer as vk_temporal.cpp reads it;
+//  - the camera: the same uniform buffer and the same checks as vk_temporal.cpp's temporal_note_scene_draw; the near plane and the
 //    field of view are read from its projection (fsr3_math.h), so nothing in the game is hooked for them;
 //  - the motion: the camera's, from the scene depth with dlss_prep.comp's math (shaders/fsr3_prep.comp). #841's actor motion
-//    (the skinned draws drawn again with last frame's bones) lives inside vk_dlss.cpp behind HOOKSHOT_NGX, so a build without
-//    NVIDIA's SDK has none of it; FSR gets it when #1008 moves that out from behind the gate.
+//    (the skinned draws drawn again with last frame's bones) is in vk_temporal.cpp, in every build since #1008; FSR 3.1
+//    gets it when these inputs move onto that chain.
 #pragma once
 
 #include <cstdint>
@@ -41,13 +42,13 @@ struct Frame {
 /// scene's camera is kept only then
 bool wanted();
 
-/// A draw into a scene-sized target with the vertex stage's uniform buffer 3 at `camera`: what vk_dlss.cpp's
-/// dlss_note_scene_draw is given, read the same way (the largest such target of the frame is the scene)
+/// A draw into a scene-sized target with the vertex stage's uniform buffer 3 at `camera`: what vk_temporal.cpp's
+/// temporal_note_scene_draw is given, read the same way (the largest such target of the frame is the scene)
 void note_scene_draw(const Texture* color0, uint32_t width, uint32_t height, Texture* depth, uint64_t camera,
                      uint64_t camera_size);
 
 /// The texture is this frame's scene colour (the size of the scene's camera this frame): for a network of the gameplay
-/// upscale's shape that is not one of the known ones, as vk_dlss.cpp's dlss_upscale tells them apart
+/// upscale's shape that is not one of the known ones, as vk_temporal.cpp's temporal_upscale tells them apart
 bool is_scene(const Texture* in);
 
 /// At the gameplay upscale's dispatch: its input as the network samples it (in, in_view), this frame's camera and depth into
@@ -64,8 +65,9 @@ void upscaled(uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh);
 
 /// The scene's width (axis 0) or height (1) for the host's camera jitter while FSR 3.1's upscaler draws, 0 otherwise or
 /// with RX_VK_FSR_JITTER=0; axis 2: the jitter sequence's length (dlss_jitter_phases). vk_replay.cpp's rx_option gives
-/// the host this or vk_dlss.cpp's dlss_jitter_size, whichever upscaler draws
+/// the host this or vk_temporal.cpp's temporal_jitter_size, whichever upscaler draws
 uint32_t jitter_size(int axis);
+MkwVkJitter jitter_sample();
 
 } // namespace fsr3_inputs
 } // namespace mkwvk

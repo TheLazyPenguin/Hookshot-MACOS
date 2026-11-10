@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cc", "gcc"]
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nx2"))
 import prompt_assets  # noqa: E402
@@ -70,14 +72,17 @@ def main():
         "}",
         re.search(r"static const uint16_t switch_code\[HOS_SW_N\] = \{[^}]*\};", src).group(0),
         re.search(r"static unsigned rd16\(.*", src).group(0),
+        re.search(r"static uint32_t rd32\(.*", src).group(0),
         re.search(r"static void wr16\(.*", src).group(0),
         block(src, "static unsigned cmap4_glyph("),
         block(src, "static int cmap4_bind("),
+        block(src, "static int bind_font("),
         "int main(int argc, char **argv) {",
         "    FILE *f = fopen(argv[1], \"rb\");",
         "    static unsigned char st[65536];",
         "    const size_t n = fread(st, 1, sizeof st, f);",
         "    fclose(f);",
+        "    if (argc > 2 && !strcmp(argv[2], \"font\")) { printf(\"%d\\n\", bind_font(st, n)); return 0; }",
         "    printf(\"%d\\n\", cmap4_bind(st, n));",
         "    for (int i = 2; i < argc; i++) printf(\"%u\\n\", cmap4_glyph(st, n, (unsigned)strtoul(argv[i], NULL, 0)));",
         "    return 0;",
@@ -89,6 +94,14 @@ def main():
         subprocess.run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT), str(c), "-o", str(exe)], check=True)
         out = subprocess.run([str(exe), str(bin_)] + [str(x) for x in codes], check=True, capture_output=True,
                              text=True).stdout.split()
+        # (a font whose cmap names a subtable at 0xFFFFFFF4: offset + 14 wrapped, and the check read 4 GB past the font)
+        font = Path(tmp) / "wrap.otf"
+        cmap_table = (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + bytes(4) + (0xFFFFFFF4).to_bytes(4, "big")
+        font.write_bytes(bytes(4) + (1).to_bytes(2, "big") + bytes(6) + b"cmap" + bytes(4) + (28).to_bytes(4, "big") +
+                         len(cmap_table).to_bytes(4, "big") + cmap_table)
+        wrapped = subprocess.run([str(exe), str(font), "font"], capture_output=True, text=True)
+        check(wrapped.returncode == 0 and wrapped.stdout.split() == ["0"],
+              "a cmap subtable offset that wraps: exit %d, %r" % (wrapped.returncode, wrapped.stdout))
     done, got = int(out[0]), [int(x) for x in out[1:]]
     check(done == len(BIND), "%d buttons bound, not %d" % (done, len(BIND)))
     for b, code in enumerate(prompt_assets.SWITCH):

@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <vector>
+
+#include "vk_work.h"   // (last: RX_VK_RECORDER=defer drains before the destructions and the invalidate below)
 
 namespace mkwvk {
 
@@ -97,7 +100,91 @@ VmaPool images_pool() {
     return image_pool;
 }
 
-bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target) {
+// (hookshot) The sampled textures' own pool, when they are compacted (RX_VK_COMPACT=1): VMA's defragmentation asks to move any
+// allocation of the pool it works on, and only vk_texture.cpp's images can be moved (it knows what they hold and who uses
+// them) or kept from being freed while a pass is open. The render targets' images stay in their blocks above; DLSS's, the
+// frame interpolation's and the scratch ones in the images' pool
+VmaPool texture_pool = VK_NULL_HANDLE;
+bool texture_pool_tried = false;
+VmaPool textures_pool() {
+    if (texture_pool_tried) return texture_pool;
+    texture_pool_tried = true;
+    VkImageCreateInfo rep{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};   // (the image pool's representative image: the same memory type)
+    rep.imageType = VK_IMAGE_TYPE_2D;
+    rep.format = VK_FORMAT_R8G8B8A8_UNORM;
+    rep.extent = {256, 256, 1};
+    rep.mipLevels = rep.arrayLayers = 1;
+    rep.samples = VK_SAMPLE_COUNT_1_BIT;
+    rep.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    VmaAllocationCreateInfo ai{};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    ai.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    uint32_t type = 0;
+    if (vmaFindMemoryTypeIndexForImageInfo(vma, &rep, &ai, &type) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VmaPoolCreateInfo pi{};
+    pi.memoryTypeIndex = type;
+    pi.blockSize = kImageBlock;
+    if (vmaCreatePool(vma, &pi, &texture_pool) != VK_SUCCESS) texture_pool = VK_NULL_HANDLE;
+    logf("vk: textures from a pool of their own, %llu MB blocks (RX_VK_COMPACT)%s", (unsigned long long)(kImageBlock >> 20),
+         texture_pool ? "" : ": not made");
+    return texture_pool;
+}
+bool textures_pool_usage(uint64_t* block_bytes, uint64_t* free_bytes) {
+    if (!texture_pool) return false;
+    VmaStatistics st{};
+    vmaGetPoolStatistics(vma, texture_pool, &st);
+    *block_bytes = st.blockBytes, *free_bytes = st.blockBytes - std::min(st.blockBytes, st.allocationBytes);
+    return true;
+}
+
+// ---- the textures' pool compacted: VMA's defragmentation context and its open pass ----
+namespace {
+VmaDefragmentationContext compact_ctx = VK_NULL_HANDLE;
+VmaDefragmentationPassMoveInfo compact_pass{};
+bool compact_in_pass = false;
+bool compact_over(uint64_t* freed_bytes, uint32_t* freed_blocks) {
+    VmaDefragmentationStats st{};
+    vmaEndDefragmentation(vma, compact_ctx, &st);
+    compact_ctx = VK_NULL_HANDLE;
+    if (freed_bytes) *freed_bytes = st.bytesFreed;
+    if (freed_blocks) *freed_blocks = st.deviceMemoryBlocksFreed;
+    return false;
+}
+}
+bool image_compact_begin(uint64_t max_bytes_a_pass, uint32_t max_moves_a_pass) {
+    if (compact_ctx || !texture_pool) return false;
+    VmaDefragmentationInfo di{};
+    di.pool = texture_pool;
+    di.maxBytesPerPass = max_bytes_a_pass;
+    di.maxAllocationsPerPass = max_moves_a_pass;
+    return vmaBeginDefragmentation(vma, &di, &compact_ctx) == VK_SUCCESS;
+}
+bool image_compact_active() { return compact_ctx != VK_NULL_HANDLE; }
+bool image_compact_pass(std::vector<ImageMove>& moves, uint64_t* freed_bytes, uint32_t* freed_blocks) {
+    moves.clear();
+    if (!compact_ctx || compact_in_pass) return false;
+    const VkResult r = vmaBeginDefragmentationPass(vma, compact_ctx, &compact_pass);
+    if (r != VK_INCOMPLETE) return compact_over(freed_bytes, freed_blocks);   // (VK_SUCCESS: nothing left to move; or an error)
+    compact_in_pass = true;
+    for (uint32_t i = 0; i < compact_pass.moveCount; i++) moves.push_back({compact_pass.pMoves[i].srcAllocation});
+    return true;
+}
+bool image_compact_bind(size_t i, VkImage image) {
+    return compact_in_pass && i < compact_pass.moveCount &&
+           vmaBindImageMemory(vma, compact_pass.pMoves[i].dstTmpAllocation, image) == VK_SUCCESS;
+}
+void image_compact_ignore(size_t i) {
+    if (compact_in_pass && i < compact_pass.moveCount)
+        compact_pass.pMoves[i].operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_IGNORE;
+}
+bool image_compact_pass_end(uint64_t* freed_bytes, uint32_t* freed_blocks) {
+    if (!compact_ctx || !compact_in_pass) return false;
+    compact_in_pass = false;
+    if (vmaEndDefragmentationPass(vma, compact_ctx, &compact_pass) == VK_INCOMPLETE) return true;
+    return compact_over(freed_bytes, freed_blocks);
+}
+
+bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures) {
     VmaAllocationCreateInfo ai{};
     ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     // (in VRAM or not at all: an image VMA puts in system memory when VRAM is full is read over PCIe every frame,
@@ -110,13 +197,22 @@ bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& al
         if (vmaCreateImage(vma, &ci, &dai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
     }
     static const bool no_pool = getenv("RX_VK_NO_IMAGE_POOL") != nullptr;
-    if (VmaPool pool = no_pool ? VK_NULL_HANDLE : target && target_images_pool() ? target_images_pool() : images_pool()) {
+    if (VmaPool pool = no_pool ? VK_NULL_HANDLE
+                       : textures && textures_pool() ? textures_pool()
+                       : target && target_images_pool() ? target_images_pool() : images_pool()) {
         VmaAllocationCreateInfo pai = ai;
         pai.pool = pool;
         pai.usage = VMA_MEMORY_USAGE_UNKNOWN;
         if (vmaCreateImage(vma, &ci, &pai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
     }
     if (vmaCreateImage(vma, &ci, &ai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
+    if (ai.flags & VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT) {
+        static std::atomic<int> told_budget{0};
+        if (told_budget++ < 10) logf("vk: image over budget, retrying without WITHIN_BUDGET");
+        VmaAllocationCreateInfo vai = ai;
+        vai.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        if (vmaCreateImage(vma, &ci, &vai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
+    }
     // (hookshot) VRAM is full (a 4 GB card at a high resolution, #96): an image left unmade is a black screen, so it goes
     // to system memory instead, slow but drawn
     if (getenv("RX_VK_IMAGES_VRAM_ONLY")) return false;
@@ -171,6 +267,9 @@ bool create_buffer_cached(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buf
 void flush_mapped(VmaAllocation allocation, uint64_t size) {
     if (size) vmaFlushAllocation(vma, allocation, 0, size);
 }
+void flush_mapped_range(VmaAllocation allocation, uint64_t offset, uint64_t size) {
+    if (size) vmaFlushAllocation(vma, allocation, offset, size);
+}
 void invalidate_mapped(VmaAllocation allocation, uint64_t size) {
     if (size) vmaInvalidateAllocation(vma, allocation, 0, size);
 }
@@ -191,12 +290,12 @@ bool create_device_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buf
 /// (every heap: what VMA has in blocks and allocations there, what the process uses of it, its budget; one line)
 /// The image pools: their blocks, the images in them, and the free ranges between them (every 600 presents, with the heaps)
 void vma_log_image_blocks() {
-    for (VmaPool pool : {image_pool, target_image_pool}) {
+    for (VmaPool pool : {image_pool, target_image_pool, texture_pool}) {
         if (!pool) continue;
         VmaDetailedStatistics d{};
         vmaCalculatePoolStatistics(vma, pool, &d);
         logf("vk: image blocks%s: %u blocks %llu MB, %u images %llu MB; %u free ranges, the largest %llu MB",
-             pool == target_image_pool ? " (render targets)" : "", d.statistics.blockCount,
+             pool == target_image_pool ? " (render targets)" : pool == texture_pool ? " (textures, compacted)" : "", d.statistics.blockCount,
              (unsigned long long)(d.statistics.blockBytes >> 20), d.statistics.allocationCount,
              (unsigned long long)(d.statistics.allocationBytes >> 20), d.unusedRangeCount,
              (unsigned long long)(d.unusedRangeSizeMax >> 20));

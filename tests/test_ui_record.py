@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

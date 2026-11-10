@@ -14,6 +14,8 @@ import sys
 import tempfile
 import zstandard as zs
 
+RUN_ALL_MODULES = ["zstandard"]
+
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[1])
 a = p.parse_args()

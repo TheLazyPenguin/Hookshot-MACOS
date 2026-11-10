@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "vk_gprof.h"
+#include "vk_work.h"   // (after the others: its timestamps go through RX_VK_RECORDER with the commands around them)
 
 namespace mkwvk {
 namespace {

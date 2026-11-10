@@ -46,7 +46,10 @@ struct { int device = 1; } dev;
 int pcache = 2;
 std::string pcache_path;
 std::atomic<int64_t> pcache_built_since_save{32};
-enum Fault { NONE, VECTOR_ALLOC, VECTOR_LENGTH, TMP_ALLOC, QUERY_FAIL, EMPTY, COPY_FAIL, SHORT_WRITE, BLOCK_COPY };
+std::atomic<std::size_t> pcache_saved_size{0};
+// The size the driver gives for the cache's data; a case grows it for pipelines taken in between saves.
+std::atomic<std::size_t> cache_size{64};
+enum Fault { NONE, VECTOR_ALLOC, VECTOR_LENGTH, TMP_ALLOC, QUERY_FAIL, EMPTY, COPY_FAIL, SHORT_WRITE, BLOCK_COPY, REPLACE_FAIL };
 std::atomic<Fault> fault{NONE};
 std::atomic<int> queries{0}, copies{0}, writes{0}, replacements{0}, save_errors{0}, start_errors{0};
 std::atomic<bool> copy_blocked{false}, allow_copy{false};
@@ -69,7 +72,7 @@ VkResult vkGetPipelineCacheData(int device, int cache, std::size_t* n, void* dat
     if (!data) {
         ++queries;
         if (fault == QUERY_FAIL) return VK_ERROR_UNKNOWN;
-        *n = fault == VECTOR_LENGTH ? (std::numeric_limits<std::size_t>::max)() : fault == EMPTY ? 0 : 64;
+        *n = fault == VECTOR_LENGTH ? (std::numeric_limits<std::size_t>::max)() : fault == EMPTY ? 0 : cache_size.load();
         if (fault == VECTOR_ALLOC) fail_next_new = true;
     } else {
         ++copies;
@@ -92,12 +95,18 @@ std::size_t save_fwrite(const void* p, std::size_t size, std::size_t n, FILE* f)
 int save_replace(const char* from, const char* to, unsigned flags) {
     if (flags != MOVEFILE_REPLACE_EXISTING || to != pcache_path) std::abort();
     ++replacements;
+    if (fault == REPLACE_FAIL) return 0;
 #ifdef _WIN32
     return MoveFileExA(from, to, flags);
 #else
     return std::rename(from, to) == 0;
 #endif
 }
+
+// The play generations' part of a save (gpu/vk/vk_draw.cpp, tests/test_pipeline_play_cache.py): at each save, after the
+// cache's own part, whatever that did.
+std::atomic<int> play_saves{0};
+void play_cache_save() { ++play_saves; }
 
 #define fwrite save_fwrite
 #define MoveFileExA save_replace
@@ -121,10 +130,10 @@ bool old_file() {
 bool new_file() {
     FILE* f = std::fopen(pcache_path.c_str(), "rb");
     if (!f) return false;
-    char data[65]{};
+    char data[257]{};
     const auto n = std::fread(data, 1, sizeof data, f);
     std::fclose(f);
-    if (n != 64) return false;
+    if (n != cache_size) return false;
     for (std::size_t i = 0; i < n; ++i) if (data[i] != 'N') return false;
     return true;
 }
@@ -137,6 +146,7 @@ int run(const std::string& name) {
         pcache_built_since_save = 32;
         pipeline_cache_save(false);
         CHECK(wait_until(copies, 1));
+        cache_size = 96;  // Pipelines taken in meanwhile: the forced save has new data to write.
         pipeline_cache_save(true);  // Wait for the worker, then preserve the existing forced-save behavior.
         CHECK(queries == 2 && writes == 2 && replacements == 2 && new_file());
         CHECK(save_errors == 0 && start_errors == 0);
@@ -149,6 +159,7 @@ int run(const std::string& name) {
         const bool async = name.starts_with("async");
         pipeline_cache_save(!async);
         CHECK(wait_until(save_errors, 1));
+        CHECK(wait_until(play_saves, 1));  // The play part all the same.
         CHECK(old_file() && replacements == 0 && start_errors == 0);
         CHECK(allocation_failures == (fault == VECTOR_LENGTH ? 0 : 1));
         fault = NONE;
@@ -188,9 +199,35 @@ int run(const std::string& name) {
         while (!started.load()) Sleep(1);
         Sleep(20);
         const bool waited = !finished.load() && queries == 1;
+        cache_size = 96;  // Taken in while the first save copied: the waiter has new data to write.
         allow_copy = true;
         waiter.join();
         CHECK(waited && finished && queries == 2 && replacements == 2 && new_file());
+    } else if (name == "unchanged") {
+        pcache_saved_size = 64;  // As pcache_init leaves it: the driver's size for the data read from the file.
+        pipeline_cache_save(true);  // At exit, nothing taken in.
+        CHECK(queries == 1 && copies == 0 && writes == 0 && old_file());
+        CHECK(play_saves == 1);  // What play made is saved apart, the cache unchanged or not.
+        pcache_built_since_save = 32;  // In play: the precompile's pipelines, all found in the cache, still count.
+        pipeline_cache_save(false);
+        CHECK(wait_until(queries, 2));
+        pipeline_cache_save(true);  // After the worker.
+        CHECK(queries == 3 && copies == 0 && writes == 0 && replacements == 0 && old_file());
+        cache_size = 96;
+        for (Fault f : {SHORT_WRITE, REPLACE_FAIL}) {  // Not in place: tried again at the next save.
+            fault = f;
+            pipeline_cache_save(true);
+            CHECK(old_file() && pcache_saved_size == 64);
+        }
+        fault = NONE;
+        pipeline_cache_save(true);
+        CHECK(queries == 6 && copies == 3 && writes == 3 && replacements == 2 && new_file() && pcache_saved_size == 96);
+        pipeline_cache_save(true);  // Written: nothing new since.
+        CHECK(queries == 7 && copies == 3 && writes == 3 && replacements == 2 && new_file());
+        cache_size = 80;  // A different size of any kind is data the file lacks.
+        pipeline_cache_save(true);
+        CHECK(copies == 4 && replacements == 3 && new_file());
+        CHECK(save_errors == 0 && start_errors == 0 && play_saves == 8);
     } else {
         CHECK(false);
     }

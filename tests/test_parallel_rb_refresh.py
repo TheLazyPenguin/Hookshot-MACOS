@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("parallel", "untracked", "serial")
 

@@ -323,15 +323,23 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
     for (int i = 0; i < 64; i++) if (CPU_ISSET(i, &old)) r |= (DWORD_PTR)1 << i;
     return r ? r : 1;
 }
-BOOL GetProcessAffinityMask(HANDLE p, DWORD_PTR *proc, DWORD_PTR *sys) {
-    (void)p;
+/* The process's affinity as the process started: Windows keeps a process mask apart from its threads' masks, Linux has
+   only the threads'. Read from the asking thread each time, it was that thread's own mask, which shrank once hos_thread_pin
+   pinned it off the reserved core: the Presentation Thread's pin, asked for from a game thread kept off that core, then
+   saw no reserved core in the "process" mask and kept the Presentation Thread off it too, against render_thread_on_reserved
+   (host/hos_thread.c; Ryzen 9 9950X3D, 2026-11-09). Taken once, before main, when no thread is pinned yet. */
+static DWORD_PTR process_affinity;
+__attribute__((constructor)) static void init_process_affinity(void) {
     cpu_set_t s;
     CPU_ZERO(&s);
-    sched_getaffinity(0, sizeof s, &s);
-    DWORD_PTR m = 0;
-    for (int i = 0; i < 64; i++) if (CPU_ISSET(i, &s)) m |= (DWORD_PTR)1 << i;
+    if (sched_getaffinity(0, sizeof s, &s) == 0)
+        for (int i = 0; i < 64; i++) if (CPU_ISSET(i, &s)) process_affinity |= (DWORD_PTR)1 << i;
+}
+BOOL GetProcessAffinityMask(HANDLE p, DWORD_PTR *proc, DWORD_PTR *sys) {
+    (void)p;
+    if (!process_affinity) init_process_affinity();   /* (the constructor did not run, or the call failed then) */
     long n = sysconf(_SC_NPROCESSORS_CONF);
-    *proc = m;
+    *proc = process_affinity;
     *sys = n >= 64 ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1);
     return TRUE;
 }

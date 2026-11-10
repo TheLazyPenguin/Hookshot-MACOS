@@ -34,7 +34,10 @@ body:
     id: what
     attributes:
       label: What happened
-      description: What you saw, and what you expected instead.
+      description: >-
+        What you saw, and what you expected instead. For low FPS or stutter, note the FPS before and after
+        and whether it happens on a second pass through the same spot. See [Low FPS or stutter](https://github.com/NotRexed/Hookshot#low-fps-or-stutter)
+        for what to compare and which logs to attach.
     validations:
       required: true
   - type: input

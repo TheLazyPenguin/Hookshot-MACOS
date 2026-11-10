@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "g++"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -27,6 +29,9 @@ def sources():
     for part in ("kTabPrev", "kTabNext", "kTab", "kRow", "kCtlRow", "kCtlCell", "kListLine", "kButton"):
         if not re.search(r"hits\.add\([^;]*menu_hit::%s\b" % part, menu):
             raise SystemExit("the menu draws a control it does not record (menu_hit::%s): the mouse cannot reach it" % part)
+    # (a click on a row's name selects it and leaves its value: row_click, checked in test_menu_hit.cpp)
+    if "menu_hit::row_click(" not in menu or "the right half, or the name, as Right" in menu:
+        raise SystemExit("the menu does not decide a row's click with menu_hit::row_click (a click on the name would change the value)")
     if "PostMessageA(app_window(), WM_APP + 8" not in menu:
         raise SystemExit("the menu does not tell the window it opened or closed")
     if "int (*pointer)(MkwVkPointer *out);" not in api or "hos_mouse_pointer," not in backend:

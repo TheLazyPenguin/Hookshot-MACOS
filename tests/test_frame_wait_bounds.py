@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("unset", "empty", "zero", "negative", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "prefix",
          "malformed", "int_max", "positive_overflow", "negative_overflow")

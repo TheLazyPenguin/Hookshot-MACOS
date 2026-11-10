@@ -64,6 +64,7 @@ sealed class Runner
     readonly List<string> args;
     readonly int? workers;
     readonly string? ngxSdk;
+    readonly int? memoryGb;
     Process? process;
     string? error;
     bool cancelled;
@@ -72,16 +73,19 @@ sealed class Runner
     public event Action<string?>? Finished;
 
     /// ngxSdk: NVIDIA DLSS (the builder's tick): the folder of NVIDIA's DLSS SDK, as HOOKSHOT_NGX_SDK; null builds without it
-    public Runner(Tools tools, List<string> args, int? workers = null, string? ngxSdk = null)
+    public Runner(Tools tools, List<string> args, int? workers = null, string? ngxSdk = null, int? memoryGb = null)
     {
         this.tools = tools;
         this.args = args;
         if (workers is <= 0) throw new ArgumentOutOfRangeException(nameof(workers), "Build workers must be positive.");
+        if (memoryGb is <= 0) throw new ArgumentOutOfRangeException(nameof(memoryGb), "Build memory must be positive.");
         this.workers = workers;
         this.ngxSdk = ngxSdk;
+        this.memoryGb = memoryGb;
     }
 
-    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args, int? workers = null, string? ngxSdk = null)
+    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args, int? workers = null, string? ngxSdk = null,
+                                 int? memoryGb = null)
     {
         var si = new ProcessStartInfo(tools.Python)
         {
@@ -93,6 +97,7 @@ sealed class Runner
         };
         si.Environment["PYTHONIOENCODING"] = "utf-8";
         BuildWorkers.Apply(si, workers);
+        BuildMemory.Apply(si, memoryGb);
         // (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
         if (Environment.ProcessPath != null) si.Environment["HOOKSHOT_BUILDER_EXE"] = Environment.ProcessPath;
         // (NVIDIA DLSS: only when ticked. Without it, one set on the PC is not passed on either: a build is with DLSS only when asked)
@@ -118,7 +123,7 @@ sealed class Runner
         {
             try
             {
-                using var p = Process.Start(Info(tools, args, workers, ngxSdk))!;
+                using var p = Process.Start(Info(tools, args, workers, ngxSdk, memoryGb))!;
                 process = p;
                 p.ErrorDataReceived += (_, e) => { if (e.Data != null) Line?.Invoke(e.Data); };
                 p.BeginErrorReadLine();

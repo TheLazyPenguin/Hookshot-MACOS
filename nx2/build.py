@@ -30,6 +30,7 @@ import concurrent.futures
 import ctypes
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -206,6 +207,10 @@ def ngx_sdk(sdk, linux):
 NGX_SDK = ngx_sdk(os.environ.get("HOOKSHOT_NGX_SDK", ""), LINUX)
 # (llvm-mingw: what NVIDIA's library asks of Microsoft's runtime, linked in with it. Not compiled otherwise)
 NGX_MSVC_RT = "vk_ngx_msvc_rt.cpp"
+# HOOKSHOT_FSR=1: the Vulkan back end with AMD FSR 4 (gpu/vk/vk_fsr4.cpp), from AMD's FSR API headers (third_party/fidelityfx,
+# MIT). AMD's signed DLLs are not part of the build: the user's, loaded at run time. Off without it (make_game.py --fsr sets
+# it; the camera jitter it needs is in every build: nx2/oot_jitter.py)
+FSR = os.environ.get("HOOKSHOT_FSR", "") == "1"
 
 
 def ngx_link(sdk, mingw):
@@ -247,6 +252,34 @@ def cpm_package(name):
         d = os.path.join(root, name)
         if os.path.isdir(d) and os.listdir(d):
             return os.path.join(d, sorted(os.listdir(d))[-1])
+    return None
+
+
+def header_package(cpm_name, probe, env=None):
+    """A package root with include/<probe>: CPM first, then env (package root or its include/ folder),
+    then common system prefixes (/usr/local, /usr). Distro vulkan-headers / spirv-headers install
+    under /usr/include; this is what makes a source build find them without a CPM tree."""
+    parts = probe.split("/")
+
+    def ok(root):
+        return bool(root) and os.path.isfile(os.path.join(root, "include", *parts))
+
+    pkg = cpm_package(cpm_name)
+    if ok(pkg):
+        return pkg
+    if env:
+        e = os.environ.get(env) or ""
+        if e:
+            e = os.path.abspath(e)
+            if ok(e):
+                return e
+            if os.path.isfile(os.path.join(e, *parts)):
+                parent = os.path.dirname(e)
+                if os.path.normpath(os.path.join(parent, "include")) == os.path.normpath(e):
+                    return parent
+    for prefix in ("/usr/local", "/usr"):
+        if ok(prefix):
+            return prefix
     return None
 
 
@@ -392,6 +425,22 @@ def mem_need(src):
     return 1000 if src.endswith(".cpp") else 400
 
 
+def mem_limit_mb():
+    """HOOKSHOT_MEM_LIMIT_GB (the builder's Build memory choice) in MB; None: the memory free decides"""
+    raw = os.environ.get("HOOKSHOT_MEM_LIMIT_GB")
+    if not raw:
+        return None
+    try:
+        gb = float(raw)
+    except ValueError:
+        gb = 0.0
+    if not (gb > 0 and math.isfinite(gb)):
+        print("HOOKSHOT_MEM_LIMIT_GB=%s is not a finite number above 0: the memory free decides" % raw, flush=True)
+        return None
+    print("build: the compilers may take %g GB together, whatever is free (HOOKSHOT_MEM_LIMIT_GB)" % gb, flush=True)
+    return gb * 1024
+
+
 class MemoryGate:
     """(issue 418) Compilers started by the memory there is, not only by --jobs: one per CPU thread ran PCs out of memory (the kernel
     stopped a compiler, or the whole build), and a count low enough for the biggest files and the PC's other programs left most of
@@ -400,24 +449,29 @@ class MemoryGate:
     on Windows up to 4 (half the threads on smaller CPUs) always run, as Windows pages rather than fails (issues 502, 503, 511: 1-2
     compilers on 16 GB PCs took hours); on Linux one (issue 531: Linux stops a compiler that does not fit, and it is compiled again
     alone). The free memory is read again as compiles start and end, so a game or browser opened during the build makes later
-    compiles wait"""
+    compiles wait. With HOOKSHOT_MEM_LIMIT_GB the player chooses instead: a compile starts when the needs of those running and its
+    own fit in that, whatever is free, above the same floor"""
 
     def __init__(self):
         self.cv = threading.Condition()
         self.running = {}   # (per-compile lease: [need, Popen or None]; one source can have several objects)
         self.reserve = float(os.environ.get("HOOKSHOT_MEM_RESERVE_GB") or 1.5) * 1024
+        self.limit = mem_limit_mb()
         self.floor = max(1, min(4, (os.cpu_count() or 2) // 2)) if os.name == "nt" else 1
+
+    def fits(self, need):
+        if self.limit:
+            return sum(n for n, _ in self.running.values()) + need <= self.limit
+        free = free_mb()
+        if free is None:
+            return True
+        owed = sum(max(0, n - rss_mb(p)) for n, p in self.running.values())
+        return free - owed - self.reserve >= need
 
     def enter(self, src):
         need = mem_need(src)
         with self.cv:
-            while len(self.running) >= self.floor:
-                free = free_mb()
-                if free is None:
-                    break
-                owed = sum(max(0, n - rss_mb(p)) for n, p in self.running.values())
-                if free - owed - self.reserve >= need:
-                    break
+            while len(self.running) >= self.floor and not self.fits(need):
                 self.cv.wait(1.0)
             lease = object()
             self.running[lease] = [need, None]
@@ -430,6 +484,8 @@ class MemoryGate:
     def expected(self, jobs):
         """How many compilers the memory free now is likely to hold at once (COMPILER_MB each), between the floor and the jobs:
         the compile countdown's estimate"""
+        if self.limit:
+            return max(self.floor, min(jobs, int(self.limit // COMPILER_MB)))
         free = free_mb()
         if free is None:
             return jobs
@@ -837,13 +893,27 @@ def main():
         for src in gpu_sources():
             name = os.path.relpath(src, GPU).replace(os.sep, "_")[:-4]
             jobs.append((cxx, src, os.path.join(obj_dir, "gpu_" + name + ".o"), gflags, gdeps))
-    # the Vulkan back end, a DLL of its own (RX_BACKEND=vulkan): built when the Vulkan headers are in the CPM cache
+    # the Vulkan back end, a DLL of its own (RX_BACKEND=vulkan): CPM cache, HOOKSHOT_*_HEADERS, or system includes
     vk_jobs = []
-    vk_headers, spirv_headers = cpm_package("vulkanheaders"), cpm_package("spirv-headers")
-    vk_prebuilt = os.environ.get("HOOKSHOT_VK_PREBUILT", "")
+    vk_headers = header_package("vulkanheaders", "vulkan/vulkan.h", "HOOKSHOT_VULKAN_HEADERS")
+    spirv_headers = header_package("spirv-headers", "spirv/unified1/spirv.h", "HOOKSHOT_SPIRV_HEADERS")
+    vma_headers = header_package("vulkanmemoryallocator", "vk_mem_alloc.h", "HOOKSHOT_VMA_HEADERS")
+    # (the AppImage's prebuilt hookshot_vk.so is built without NVIDIA's SDK: a build with HOOKSHOT_NGX_SDK compiles its own)
+    vk_prebuilt = "" if NGX_SDK else os.environ.get("HOOKSHOT_VK_PREBUILT", "")
+    build_vk = a.standalone and not a.only and not vk_prebuilt and vk_headers and spirv_headers and vma_headers
     if a.standalone and not a.only and vk_prebuilt:
         print("the Vulkan back end: %s, as built" % vk_prebuilt)
-    elif a.standalone and not a.only and vk_headers and spirv_headers:
+    elif a.standalone and not a.only and not build_vk:
+        # (was silent: the exe linked, RX_BACKEND=vulkan then fell through to WebGPU / a stub, black window)
+        missing = [n for n, p in (("Vulkan", vk_headers), ("SPIR-V", spirv_headers), ("VMA", vma_headers)) if not p]
+        print("no headers for %s (missing %s). Set RX_CPM to a CPM cache, or HOOKSHOT_VULKAN_HEADERS / "
+              "HOOKSHOT_SPIRV_HEADERS / HOOKSHOT_VMA_HEADERS (package root or its include/ folder), or install "
+              "distro packages vulkan-headers + spirv-headers + vulkan-memory-allocator, or set HOOKSHOT_VK_PREBUILT."
+              % (VK_LIB, ", ".join(missing)), flush=True)
+        return 1
+    elif build_vk:
+        print("the Vulkan back end: Vulkan %s, SPIR-V %s, VMA %s" % (vk_headers, spirv_headers, vma_headers), flush=True)
+    if build_vk:
         cxx = toolchain.need(toolchain.find("clang++"))
         vk = os.path.join(GPU, "vk")
         # (hookshot) the start-up screen's logo, assets/hookshot.png as RGBA bytes in a header of the build's own (nx2/logo_rgba.py);
@@ -877,12 +947,19 @@ def main():
             "-I" + os.path.join(GPU, "third_party", "suyu"),
             "-I" + os.path.join(vk, "sirit", "include"), "-I" + os.path.join(vk, "sirit", "src"),
             "-I" + os.path.join(spirv_headers, "include"), "-I" + os.path.join(spirv_headers, "include", "spirv", "unified1"),
-            "-I" + os.path.join(vk_headers, "include"), "-I" + vk, "-I" + gen_dir] +             (["-I" + os.path.join(cpm_package("vulkanmemoryallocator"), "include")] if cpm_package("vulkanmemoryallocator") else [])
+            "-I" + os.path.join(vk_headers, "include"), "-I" + os.path.join(vma_headers, "include"),
+            "-I" + vk, "-I" + gen_dir]
         # (NVIDIA DLSS, a local build's option: scripts/ngx_sdk.py. Only vk_dlss.cpp sees NVIDIA's headers; without them
         # it is the stubs that say DLSS is not there)
         ngx_flags = ["-DHOOKSHOT_NGX", "-I" + os.path.join(NGX_SDK, "include")] if NGX_SDK else []
+        ngx_deps = tree_headers(os.path.join(NGX_SDK, "include")) if NGX_SDK else b""
         if NGX_SDK:
             print("the Vulkan back end: with NVIDIA DLSS (NVIDIA's NGX SDK in %s)" % NGX_SDK, flush=True)
+        # (AMD FSR 4, a build's option too: only vk_fsr4.cpp sees AMD's headers; without them it is the stubs that say FSR is
+        # not there)
+        fsr_flags = ["-DHOOKSHOT_FSR", "-I" + os.path.join(kit.HERE, "..", "third_party", "fidelityfx")] if FSR else []
+        if FSR:
+            print("the Vulkan back end: with AMD FSR 4 (AMD's FSR API headers, third_party/fidelityfx)", flush=True)
         # (Eden's recompiler and sirit see only their own headers: a change to the back end's vk_*.h does not
         # rebuild their ~500 files; the back end itself depends on everything, suyu's texture decoders included)
         vk_lib_deps = tree_headers(os.path.join(vk, "eden"), os.path.join(vk, "sirit"), os.path.join(vk, "compat"),
@@ -921,8 +998,10 @@ def main():
                             vflags + ([shader_stamp] if os.path.basename(src) == "vk_shader.cpp" else []) +
                             ([stamp_def] if os.path.basename(src) == "vk_menu.cpp" else []) +
                             (ngx_flags if os.path.basename(src) == "vk_dlss.cpp" else []) +
-                            (imgui_flags if os.path.basename(src) in imgui_users else []),
+                            (imgui_flags if os.path.basename(src) in imgui_users else []) +
+                            (fsr_flags if os.path.basename(src) == "vk_fsr4.cpp" else []),
                             vk_lib_deps if lib else vdeps + (logo_text if os.path.basename(src) == "vk_imgui.cpp" else b"") +
+                            (ngx_deps if os.path.basename(src) == "vk_dlss.cpp" else b"") +
                             (imgui_deps if os.path.basename(src) in imgui_users else b"")))
         if NGX_SDK and not LINUX and toolchain.mingw():
             # (llvm-mingw: NVIDIA's static library was built with Microsoft's compiler for its static runtime (/MT). What it asks

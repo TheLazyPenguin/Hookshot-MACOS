@@ -48,6 +48,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "gpu/vk/vk_state.h": "struct State {};\n",
             "gpu/vk/vk_api.h": "struct Api {};\n",
             "gpu/vk/vk_dlss.cpp": "int dlss;\n",
+            "gpu/vk/vk_fsr4.cpp": "int fsr;\n",
             "gpu/vk/vk_ngx_msvc_rt.cpp": "int msvc_rt;\n",
             "host/mingw_msvc_shims.c": "int shims;\n",
             "gpu/vk/eden/translate.cpp": "int translator;\n",
@@ -88,7 +89,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             path.write_bytes(text.encode())
         self.code = production_code(BUILD_SCRIPT)
 
-    def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw"):
+    def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw", fsr=False):
         namespace = {
             "os": os, "hashlib": hashlib,
             "GPU": str(self.root / "gpu"), "POSIX": str(self.root / "host/posix"), "HOST": str(self.root / "host"),
@@ -99,6 +100,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "cpm_package": lambda name: str(self.root / "deps" / name),
             "spirv_headers": str(self.root / "deps/spirv-headers"),
             "vk_headers": str(self.root / "deps/vulkanheaders"),
+            "vma_headers": str(self.root / "deps/vulkanmemoryallocator"),
             "obj_dir": str(self.root / "obj"), "cc": "clang", "jobs": [],
             "stamp_def": '-DHOOKSHOT_VERSION="%s"' % version, "logo_text": b"", "gen_dir": str(self.root / "gen"),
             "fonts_cpp": str(self.root / "gen/ui_fonts.cpp"),
@@ -107,6 +109,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "ui_fonts": SimpleNamespace(write=lambda path: None),
             "NGX_SDK": ngx,   # ("": no NVIDIA NGX SDK, vk_dlss.cpp built without DLSS, as by default)
             "NGX_MSVC_RT": "vk_ngx_msvc_rt.cpp",
+            "FSR": fsr,   # (HOOKSHOT_FSR=1: vk_fsr4.cpp built with AMD FSR 4)
         }
         with mock.patch.dict(os.environ, {"RX_RELEASE": "1"} if release else {}, clear=True), warnings.catch_warnings():
             # The production key/header helpers use short-lived open(...).read() expressions.
@@ -200,6 +203,17 @@ class ShaderStampCacheTests(unittest.TestCase):
                 self.assertEqual({n for n, j in ngx.items() if "-DHOOKSHOT_NGX" in j["flags"]},
                                  {"gpu/vk/vk_dlss.cpp"} | ({"gpu/vk/vk_ngx_msvc_rt.cpp"} if mingw and not linux else set()))
                 self.assertEqual(self.changed(plain, {n: ngx[n] for n in plain}), {"gpu/vk/vk_dlss.cpp"})
+
+    def test_fsr_reaches_only_vk_fsr4(self):
+        for linux in (False, True):
+            with self.subTest(linux=linux):
+                plain = self.jobs(linux)
+                self.assertFalse([n for n, j in plain.items() if "-DHOOKSHOT_FSR" in j["flags"]])
+                with mock.patch("builtins.print"):
+                    fsr = self.jobs(linux, fsr=True)
+                self.assertEqual(set(fsr), set(plain))   # (no other files: AMD's headers alone, nothing linked)
+                self.assertEqual({n for n, j in fsr.items() if "-DHOOKSHOT_FSR" in j["flags"]}, {"gpu/vk/vk_fsr4.cpp"})
+                self.assertEqual(self.changed(plain, fsr), {"gpu/vk/vk_fsr4.cpp"})
 
 
 class NgxSdkTests(unittest.TestCase):

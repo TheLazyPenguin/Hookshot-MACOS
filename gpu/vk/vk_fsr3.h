@@ -56,10 +56,11 @@ struct Inputs {
 
 } // namespace fsr3
 
-/// FSR 3.1 upscales: the Insert menu's Upscaler row says FSR 3.1 (upscaler_rows.h FSR3) or RX_VK_FSR=1, and it runs here
+/// FSR 3.1 upscales: the Insert menu's Upscaler row says FSR 3.1 (upscaler_rows.h FSR3) and neither RX_VK_DLSS nor
+/// RX_VK_FSR4 is set over it (vk_temporal.h temporal_env_chosen), or RX_VK_FSR=1; and it runs here
 bool fsr3_wanted();
 
-/// A gameplay upscale's dispatch, as vk_dlss.h's dlss_upscale takes it (vk_draw.cpp's fsr3_stand_in finds them the same
+/// A gameplay upscale's dispatch, as vk_temporal.h's temporal_upscale takes it (vk_draw.cpp's fsr3_stand_in finds them the same
 /// way). With FSR 3.1's frame interpolation on, the dispatch's input and this frame's camera become its inputs here
 /// (vk_fsr3_inputs.h) whichever upscaler runs. true: FSR 3.1 wrote the output (the dispatch is left out); false: the network
 /// (or DLSS) runs, the reason logged when it changes

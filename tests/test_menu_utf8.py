@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -74,6 +76,8 @@ int main() {
     const std::string key2 = mic_key(name.c_str());
     CHECK(key2.size() <= kMicNameKept && whole(key2) && key2.size() == 59);
     CHECK(mic_key(nullptr).empty() && mic_key("USB Mic") == "USB Mic");
+    // (a device's name with a line break would have added lines to hookshot_options.ini)
+    CHECK(mic_key("Mic\noutput_res=2\r") == "Mic output_res=2 ");
     std::printf("PASS: the menu's text cut and slid by whole UTF-8 characters\n");
 }
 '''

@@ -54,7 +54,9 @@ static void sleep_ms(unsigned ms) { Sleep(ms); }
 static Ipc ipc_connect(int i) {
     char name[48];
     snprintf(name, sizeof name, "\\\\.\\pipe\\discord-ipc-%d", i);
-    return CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    /* (identification only: another program that made a pipe of this name cannot act as this one) */
+    return CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                       NULL);
 }
 static void ipc_close(Ipc p) { CloseHandle(p); }
 static int ipc_write(Ipc p, const void *d, size_t n) {

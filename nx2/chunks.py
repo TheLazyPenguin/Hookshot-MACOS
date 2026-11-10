@@ -301,4 +301,4 @@ def edit_c(gen, stats, supported, whole=True):
     group of stores shared (a64_lift.group_marks), which changes that text. stats: the lift's, for its report"""
     import oot_patches
     oot_patches.apply(gen, protect_hearts=supported, required=supported and whole)
-    a64_lift.group_marks(sorted(glob.glob(os.path.join(gen, "code_*.c"))), stats)
+    a64_lift.group_marks(sorted(glob.glob(os.path.join(glob.escape(gen), "code_*.c"))), stats)

@@ -26,6 +26,7 @@
 
 #include "vk_framegen.h"
 #include "vk_menu.h"
+#include "vk_work.h"   // (last: RX_VK_RECORDER=defer drains before the latency-sleep wait; =thread does not need to, the driver signals it)
 
 namespace mkwvk {
 

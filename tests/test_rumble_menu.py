@@ -83,6 +83,7 @@ bool can_mic() { return false; }
 /* (the Upscaler row's choices, which set_row steps through: the game's own only, here) */
 unsigned upscalers_available() { return 1; }
 void mic_chosen() {}
+void samplers_changed() {}
 // (set_row steps the Output row through vk_menu.cpp's step_output_choice (#1144): not what this checks)
 int step_output_choice(int id, int dir) { return id + dir; }
 %(set_row)s
@@ -128,10 +129,11 @@ def wheel_free(menu):
         raise SystemExit("FAIL: the wheel on the tabs does not scroll the rows")
     if "if (ptr.wheel) wheel_rows[kControlsSlot] += ptr.wheel" not in tick:
         raise SystemExit("FAIL: the wheel on the Controls page does not scroll it")
-    lists = menu[menu.index("void list_mouse("):menu.index("void teleport_reveal()")]
-    if "scroll = std::max(0, std::min(scroll - ptr.wheel" not in lists or re.search(r"choice\s*=[^;]*ptr\.wheel", lists):
-        raise SystemExit("FAIL: the wheel on a list does not scroll it, or moves the choice")
-    for line in (menu[menu.index("void list_mouse("):]).splitlines():
+    lists = menu[menu.index("void inventory_mouse("):menu.index("void cheat_press(")]
+    if ("inventory_page = std::max(0, inventory_page - ptr.wheel)" not in lists or "teleport_wheel += ptr.wheel" not in lists
+            or re.search(r"(item_choice|teleport_choice)\s*=[^;]*ptr\.wheel", lists)):
+        raise SystemExit("FAIL: the wheel on a list page does not scroll it, or moves the choice")
+    for line in (menu[menu.index("void inventory_mouse("):]).splitlines():
         if "ptr.wheel" in line and re.search(r"set_row|press\[[34]\]|ask_sel|tab_left|tab_right|\bsel =|csel =", line):
             raise SystemExit("FAIL: the wheel still changes something: " + line.strip())
     scroll = menu[menu.index("float scroll_rows("):menu.index("void scroll_bar(")]
@@ -172,8 +174,8 @@ def menu_fixture():
 def option_ids():
     """option 9 is the menu's Rumble strength, and no other option has its id"""
     replay, api = read("gpu", "vk", "vk_replay.cpp"), read("gpu", "vk", "vk_api.h")
-    value = {}   # (every HOS_OPT_* enum: the cheats', the motion rows' and DLSS's jitter)
-    for first, start, rest in re.findall(r"enum \{ (HOS_OPT_\w+) = (\d+), ([^}]*)\}", api):
+    value = {}   # (every HOS_OPT_* enum: the cheats', the motion rows', DLSS's jitter and one-name ones as Text size's)
+    for first, start, rest in re.findall(r"enum \{ (HOS_OPT_\w+) = (\d+)([^}]*)\}", api):
         names = [first] + [n.strip() for n in rest.split(",") if n.strip()]
         value.update({n: int(start) + i for i, n in enumerate(names)})
     table = block(replay, replay.index("t.option = [](int id) -> int {"))

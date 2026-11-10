@@ -296,6 +296,45 @@ def free_space(path):
         return None, None
 
 
+def spinning(path):
+    """True on a hard drive, False on an SSD, None when the drive cannot be told (Disk.cs's IOCTL: the volume's seek penalty).
+    A build reads and writes tens of gigabytes, and an SSD makes that much faster: a warning only, never a stop."""
+    try:
+        from ctypes import wintypes
+        root = os.path.splitdrive(os.path.abspath(os.path.expanduser(path)))[0]
+        if not root:
+            return None
+
+        class Query(ctypes.Structure):
+            _fields_ = [("PropertyId", wintypes.DWORD), ("QueryType", wintypes.DWORD), ("Additional", wintypes.DWORD)]
+
+        class SeekPenalty(ctypes.Structure):
+            _fields_ = [("Version", wintypes.DWORD), ("Size", wintypes.DWORD), ("IncursSeekPenalty", ctypes.c_ubyte)]
+
+        k = ctypes.windll.kernel32
+        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                      ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        k.DeviceIoControl.restype = wintypes.BOOL
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k.CreateFileW("\\\\.\\" + root, 0, 0x1 | 0x2, None, 3, 0, None)   # (read + write share, OPEN_EXISTING)
+        if not handle or handle == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            query, answer, returned = Query(7, 0, 0), SeekPenalty(), wintypes.DWORD()
+            ok = k.DeviceIoControl(handle, 0x002D1400, ctypes.byref(query), ctypes.sizeof(query), ctypes.byref(answer),
+                                   ctypes.sizeof(answer), ctypes.byref(returned), None)
+            if not ok or returned.value < ctypes.sizeof(answer):
+                return None
+            return bool(answer.IncursSeekPenalty)
+        finally:
+            k.CloseHandle(handle)
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 # ---------------- the player's game files (Finder.cs) ----------------
 
 class Dump:

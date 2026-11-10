@@ -66,6 +66,10 @@ static int looks_like_camera(uint64_t cam) {
            fabsf(y) <= 360.0f;
 }
 
+/* The Controls row "Disable camera centering" (option 45), independent of the mouse mode. The game's state-3 yaw-follow
+   branch asks before it runs (nx2/oot_patches.py); 0 keeps the stock behavior, including without a renderer. */
+int hos_disable_camera_centering(void) { return rx_option(45, 0); }
+
 /* f_80644c80's first line (nx2/oot_patches.py): cam is the player camera, the game's thread */
 void hos_mouse_camera(uint64_t cam) {
     if (!cam || !native_on() || !looks_like_camera(cam)) return;

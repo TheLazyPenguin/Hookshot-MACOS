@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Windows;
 
@@ -80,7 +81,7 @@ static class Updater
         using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
         w.Note("Asking GitHub for the latest release");
-        string? setupUrl = null, setupApiUrl = null;
+        string? setupUrl = null, setupApiUrl = null, setupDigest = null;
         long setupSize = 0;
         using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
         using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
@@ -90,13 +91,14 @@ static class Updater
                     setupUrl = asset.GetProperty("browser_download_url").GetString();
                     setupApiUrl = asset.GetProperty("url").GetString();
                     setupSize = asset.GetProperty("size").GetInt64();
+                    setupDigest = DigestText(asset);
                 }
         if (setupUrl == null) throw new InvalidOperationException("The latest release has no " + SetupAsset + ".");
         var cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HookshotBuilder", "update");
         Directory.CreateDirectory(cache);
         var setup = Path.Combine(cache, SetupAsset);
         w.Note("Downloading the new Hookshot Builder");
-        await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token);
+        await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, setupDigest, token);
         var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
         foreach (var arg in args) si.ArgumentList.Add(arg);
         Process.Start(si);
@@ -135,6 +137,7 @@ static class Updater
             w.Note("Asking GitHub for the latest release");
             string? newTag = null, url = null, setupUrl = null;
             string? apiUrl = null, setupApiUrl = null;
+            string? digest = null, setupDigest = null;
             long size = 0, setupSize = 0;
             var hasList = false;
             using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
@@ -149,12 +152,14 @@ static class Updater
                         url = asset.GetProperty("browser_download_url").GetString();
                         apiUrl = asset.GetProperty("url").GetString();
                         size = asset.GetProperty("size").GetInt64();
+                        digest = DigestText(asset);
                     }
                     else if (assetName == SetupAsset)
                     {
                         setupUrl = asset.GetProperty("browser_download_url").GetString();
                         setupApiUrl = asset.GetProperty("url").GetString();
                         setupSize = asset.GetProperty("size").GetInt64();
+                        setupDigest = DigestText(asset);
                     }
                     else if (assetName == SetupList) hasList = true;
                 }
@@ -178,7 +183,7 @@ static class Updater
             {
                 w.Note($"Downloading the update for {newTag}");
                 var setup = Path.Combine(cache, SetupAsset);
-                await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token);
+                await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, setupDigest, token);
                 var ssi = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
                 foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) ssi.ArgumentList.Add(arg);
                 Process.Start(ssi);
@@ -188,7 +193,7 @@ static class Updater
             if (url == null) throw new InvalidOperationException("The latest release has no " + Asset + ".");
             var zip = Path.Combine(cache, "HookshotBuilder-" + name + ".zip");
             w.Note($"Downloading {Asset} of {newTag} ({size >> 20} MB)");
-            await DownloadWithRetries(w, http, url, apiUrl, zip, size, token, w.DownloadProgress);
+            await DownloadWithRetries(w, http, url, apiUrl, zip, size, digest, token, w.DownloadProgress);
             w.Note("Unpacking the new version");
             // (beside this app when that folder takes writing, else in the app data folder)
             var parent = Directory.GetParent(AppContext.BaseDirectory.TrimEnd('\\', '/'))!.FullName;
@@ -256,15 +261,27 @@ static class Updater
             last, (last as HttpRequestException)?.StatusCode);
     }
 
-    static async Task DownloadWithRetries(MainWindow w, HttpClient http, string url, string? apiUrl, string path, long size,
-        CancellationToken token, Action<double>? progress = null)
+    static string? DigestText(JsonElement asset) =>
+        asset.TryGetProperty("digest", out var digest) && digest.ValueKind == JsonValueKind.String ? digest.GetString() : null;
+
+    static byte[] ParseDigest(string? digest)
     {
+        if (digest == null || !digest.StartsWith("sha256:", StringComparison.Ordinal) || digest.Length != 71)
+            throw new InvalidDataException("GitHub did not provide a valid SHA-256 digest for this download.");
+        try { return Convert.FromHexString(digest[7..]); }
+        catch (FormatException e) { throw new InvalidDataException("GitHub did not provide a valid SHA-256 digest for this download.", e); }
+    }
+
+    static async Task DownloadWithRetries(MainWindow w, HttpClient http, string url, string? apiUrl, string path, long size,
+        string? digest, CancellationToken token, Action<double>? progress = null)
+    {
+        var expectedHash = ParseDigest(digest);   // Only the selected asset needs a digest; before any payload request.
         Exception? last = null;
         for (var attempt = 0; attempt <= RetryDelays.Length; attempt++)
         {
             try
             {
-                await DownloadOnce(http, url, path, size, token, progress, apiAsset: false);
+                await DownloadOnce(http, url, path, size, expectedHash, token, progress, apiAsset: false);
                 return;
             }
             catch (Exception e) when (IsTransient(e))
@@ -277,7 +294,7 @@ static class Updater
             {
                 try
                 {
-                    await DownloadOnce(http, apiUrl, path, size, token, progress, apiAsset: true);
+                    await DownloadOnce(http, apiUrl, path, size, expectedHash, token, progress, apiAsset: true);
                     return;
                 }
                 catch (Exception e) when (IsTransient(e))
@@ -294,35 +311,53 @@ static class Updater
             last, (last as HttpRequestException)?.StatusCode);
     }
 
-    static async Task DownloadOnce(HttpClient http, string url, string path, long size, CancellationToken token,
-        Action<double>? progress, bool apiAsset)
+    static async Task DownloadOnce(HttpClient http, string url, string path, long size, byte[] expectedHash,
+        CancellationToken token, Action<double>? progress, bool apiAsset)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (apiAsset) request.Headers.Accept.ParseAdd("application/octet-stream");
-        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
-        if (!response.IsSuccessStatusCode) throw HttpFailure(response);
-
-        var total = response.Content.Headers.ContentLength ?? size;
-        await using var from = await response.Content.ReadAsStreamAsync(token);
-        await using var to = File.Create(path);
-        var buffer = new byte[1 << 20];
-        long have = 0;
-        var shown = DateTime.MinValue;
-        int n;
-        while (true)
+        var partial = path + ".part-" + Guid.NewGuid().ToString("N");
+        var owned = false;
+        try
         {
-            try { n = await from.ReadAsync(buffer, token); }
-            catch (IOException e) { throw new HttpRequestException("The download connection ended unexpectedly.", e); }
-            if (n == 0) break;
-            await to.WriteAsync(buffer.AsMemory(0, n), token);
-            have += n;
-            if (progress != null && total > 0 && DateTime.UtcNow - shown > TimeSpan.FromMilliseconds(200))
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (apiAsset) request.Headers.Accept.ParseAdd("application/octet-stream");
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            if (!response.IsSuccessStatusCode) throw HttpFailure(response);
+
+            var total = response.Content.Headers.ContentLength ?? size;
+            await using (var from = await response.Content.ReadAsStreamAsync(token))
+            await using (var to = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                shown = DateTime.UtcNow;
-                progress(Math.Min(1.0, (double)have / total));
+                owned = true;
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                var buffer = new byte[1 << 20];
+                long have = 0;
+                var shown = DateTime.MinValue;
+                int n;
+                while (true)
+                {
+                    try { n = await from.ReadAsync(buffer, token); }
+                    catch (IOException e) { throw new HttpRequestException("The download connection ended unexpectedly.", e); }
+                    if (n == 0) break;
+                    await to.WriteAsync(buffer.AsMemory(0, n), token);
+                    hash.AppendData(buffer, 0, n);
+                    have += n;
+                    if (progress != null && total > 0 && DateTime.UtcNow - shown > TimeSpan.FromMilliseconds(200))
+                    {
+                        shown = DateTime.UtcNow;
+                        progress(Math.Min(1.0, (double)have / total));
+                    }
+                }
+                if (total > 0 && have != total) throw new HttpRequestException($"The download ended early ({have >> 20} of {total >> 20} MB).");
+                if (!CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), expectedHash))
+                    throw new InvalidDataException("The download did not match GitHub's SHA-256 digest.");
             }
+            File.Move(partial, path, overwrite: true);
         }
-        if (total > 0 && have != total) throw new HttpRequestException($"The download ended early ({have >> 20} of {total >> 20} MB).");
+        finally
+        {
+            if (owned)
+                try { File.Delete(partial); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     static HttpRequestException HttpFailure(HttpResponseMessage response) =>

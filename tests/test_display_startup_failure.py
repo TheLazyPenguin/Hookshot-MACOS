@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("headless", "headless_zero", "load_failure", "init_failure", "window_failure",
          "visible_success", "thread_failure", "prepare_success", "prepare_no_vulkan",

@@ -43,9 +43,13 @@ struct VkShaderModuleCreateInfo {
 };
 namespace Shader {
 namespace IR { enum class Attribute : uint64_t {}; }
+struct Descriptor {   // (a descriptor's array size, which get_info checks)
+    uint32_t count;
+    Descriptor(uint32_t c = 1) : count(c) {}
+};
 struct Info {
     uint32_t marker = 0;
-    std::vector<uint32_t> constant_buffer_descriptors, storage_buffers_descriptors,
+    std::vector<Descriptor> constant_buffer_descriptors, storage_buffers_descriptors,
         texture_buffer_descriptors, image_buffer_descriptors, texture_descriptors, image_descriptors;
     std::map<IR::Attribute, IR::Attribute> legacy_stores_mapping;
     std::vector<std::vector<uint32_t>> handle_programs;

@@ -251,14 +251,20 @@ static uint64_t load_n(uint64_t a, uint32_t size) {
 uint8_t a64_dirty[1u << 20];   /* (rt/a64.h A64_MARK) */
 #endif
 
+/* The page is marked after the store, as recomp_store* do: the renderer clears a mark and then reads the page
+   (gpu/render/rx_buffer.cpp), so a mark set before the compare-and-swap could be taken with the old bytes and the
+   store then left unmarked. A failed one stores nothing and marks nothing. */
 static int cas_n(uint64_t a, uint32_t size, uint64_t expect, uint64_t value) {
-    A64_MARK(a, size);   /* (marked whether or not it stores: harmless) */
+    int ok;
     switch (size) {
-    case 1: { uint8_t e = (uint8_t)expect; return __atomic_compare_exchange_n((uint8_t *)A64_PTR(a), &e, (uint8_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    case 2: { uint16_t e = (uint16_t)expect; return __atomic_compare_exchange_n((uint16_t *)A64_PTR(a), &e, (uint16_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    case 4: { uint32_t e = (uint32_t)expect; return __atomic_compare_exchange_n((uint32_t *)A64_PTR(a), &e, (uint32_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-    default: { uint64_t e = expect; return __atomic_compare_exchange_n((uint64_t *)A64_PTR(a), &e, value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+    case 1: { uint8_t e = (uint8_t)expect; ok = __atomic_compare_exchange_n((uint8_t *)A64_PTR(a), &e, (uint8_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    case 2: { uint16_t e = (uint16_t)expect; ok = __atomic_compare_exchange_n((uint16_t *)A64_PTR(a), &e, (uint16_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    case 4: { uint32_t e = (uint32_t)expect; ok = __atomic_compare_exchange_n((uint32_t *)A64_PTR(a), &e, (uint32_t)value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
+    default: { uint64_t e = expect; ok = __atomic_compare_exchange_n((uint64_t *)A64_PTR(a), &e, value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break; }
     }
+    if (ok)
+        A64_MARK(a, size);
+    return ok;
 }
 
 uint64_t recomp_ldxr(GuestContext *c, uint64_t addr, uint32_t size) {
@@ -293,6 +299,8 @@ uint32_t recomp_stxp(GuestContext *c, uint64_t addr, uint32_t size, uint64_t lo,
         unsigned __int128 e = ((unsigned __int128)c->excl_hi << 64) | c->excl_lo;
         unsigned __int128 v = ((unsigned __int128)hi << 64) | lo;
         ok = __atomic_compare_exchange_n((unsigned __int128 *)A64_PTR(addr), &e, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        if (ok)
+            A64_MARK(addr, 16);
 #else
         ok = load_n(addr, 8) == c->excl_lo && load_n(addr + 8, 8) == c->excl_hi;
         if (ok) { recomp_store64(c, addr, lo); recomp_store64(c, addr + 8, hi); }

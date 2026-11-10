@@ -29,10 +29,12 @@ inline bool crossed(bool& over, uint64_t used, uint64_t allowed) {
     return tell;
 }
 
-/// What the warning adds for the upscaler drawing (1 DLSS, 2 DLAA; 0 neither: nothing)
+/// What the warning adds for the upscaler drawing (upscaler_rows.h: 1 DLSS, 2 DLAA, 4 FSR 4, 5 its native AA; 0 none: nothing)
 inline const char* over_advice(int dlss_mode) {
     if (dlss_mode == 2) return ": DLAA may stutter here; Quality or Balanced uses less";
     if (dlss_mode == 1) return ": DLSS may stutter here; a lower Render resolution mode uses less";
+    if (dlss_mode == 5) return ": FSR 4's native AA may stutter here; FSR 4's Quality or Balanced uses less";
+    if (dlss_mode == 4) return ": FSR 4 may stutter here; a lower Render resolution mode uses less";
     return "";
 }
 inline int over_text(char* b, size_t n, uint64_t used, uint64_t allowed, int dlss_mode) {

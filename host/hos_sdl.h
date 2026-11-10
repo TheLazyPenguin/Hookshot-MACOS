@@ -27,6 +27,7 @@ void *hos_sdl_metal_layer(void *window);   /* (CAMetalLayer *): NULL if not made
 void hos_sdl_pixel_size(void *window, int *width, int *height);
 const uint8_t *hos_sdl_keys(int *count);   /* the keyboard by scancode (USB HID usage), 1 a key down */
 uint32_t hos_sdl_mouse_buttons(void);   /* 1 left, 2 middle, 4 right */
+void hos_sdl_mouse_position(float *x, float *y);   /* main thread, window-coordinate units */
 void hos_sdl_window_size(void *window, int *width, int *height);   /* (in the units of the mouse's position, not pixels) */
 void hos_sdl_icon(void *window, const char *png);   /* (SDL 3.4's PNG loader: nothing on SDL2 or an older SDL3) */
 

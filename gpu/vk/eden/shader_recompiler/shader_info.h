@@ -231,6 +231,9 @@ struct TextureDescriptor {
     /// Index in Info::handle_programs when the handle is computed at draw time (read from a
     /// storage buffer), ~0 when it is the constant buffer word above.
     u32 handle_program{~0U};
+    /// The type is the instruction's own (TEX, TLD, TXD...) and no answer about the bound texture set it.
+    /// False for a size query that had to ask (TexturePass, ImageQueryDimensions), and for a descriptor it shares.
+    bool type_fixed{};
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };

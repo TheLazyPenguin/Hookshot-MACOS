@@ -14,6 +14,10 @@ import subprocess
 import sys
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+# (Linux only)
+RUN_ALL_SKIP = {"windows": "POSIX signals: the Linux guard"}
+
 ROOT = Path(__file__).resolve().parents[1]
 START = "return (VkResult)-77;   // (a fault in the driver, told apart from what it returns)\n    }\n}\n#else\n"
 END = "\n#endif\nVkPipeline build_graphics"

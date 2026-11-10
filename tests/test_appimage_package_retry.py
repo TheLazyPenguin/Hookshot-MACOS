@@ -13,6 +13,9 @@ import sys
 import tempfile
 import unittest
 
+# (Linux only)
+RUN_ALL_SKIP = {"windows": "the AppImage package bootstrap is POSIX shell; exercised on Linux"}
+
 ROOT = Path(__file__).resolve().parents[1]
 STAGES = ("update", "prerequisites", "ppa", "toolchain", "dependencies")
 STUB = r'''#!/usr/bin/env python3

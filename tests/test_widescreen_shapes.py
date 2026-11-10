@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cc", "gcc"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

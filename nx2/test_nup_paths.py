@@ -26,12 +26,22 @@ class WriteAttempt(AssertionError):
 @contextmanager
 def guard_io(root):
     """Keep unsafe probes inside this fixture, without faking successful metadata reads."""
-    roots = {os.path.normcase(os.path.abspath(root)), os.path.normcase(os.path.realpath(root))}
+    def normalized(path):
+        path = os.path.normcase(os.path.abspath(path))
+        # Compare equivalent filesystem paths; keep the original spelling for the real metadata call.
+        if os.name == "nt":
+            if path.startswith("\\\\?\\unc\\"):
+                return "\\\\" + path[8:]
+            if path.startswith("\\\\?\\") and path[5:7] == ":\\":
+                return path[4:]
+        return path
+
+    roots = {normalized(root), normalized(os.path.realpath(root))}
     attempts = []
 
     def metadata(function):
         def checked(path, *args, **kwargs):
-            candidate = os.path.normcase(os.path.abspath(path))
+            candidate = normalized(path)
             for owned in roots:
                 try:
                     common = os.path.commonpath((candidate, owned))
@@ -221,6 +231,17 @@ class ExtractionPaths(unittest.TestCase):
                         result.close()
             self.assertEqual(attempts, [name for name, _ in operations])
         self.assertEqual(before, snapshot(self.root))
+
+    def test_metadata_guards_accept_owned_paths_and_reject_siblings(self):
+        outside = self.root.with_name(self.root.name + "-sibling") / "outside.bin"
+        with guard_io(self.root) as attempts:
+            for path in dict.fromkeys((str(self.sentinel), nup.long_path(str(self.sentinel)))):
+                with self.subTest(owned=path):
+                    self.assertEqual(os.lstat(path).st_size, len(b"keep outside data"))
+            for path in dict.fromkeys((str(outside), nup.long_path(str(outside)))):
+                with self.subTest(outside=path), self.assertRaisesRegex(AssertionError, "^metadata access outside fixture:"):
+                    os.lstat(path)
+            self.assertEqual(attempts, [])
 
     def test_parent_path_cannot_overwrite_a_sibling(self):
         # This also safely demonstrates the original failure: both files belong to this fixture.

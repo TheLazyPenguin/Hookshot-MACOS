@@ -7,6 +7,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--headers", "{spirv_headers}", "--spirv-val", "{spirv_val}"]
+# (spirv-val: SPIRV-Tools comes with the Linux runner's packages, not on Windows)
+RUN_ALL_SKIP = {"windows": "needs spirv-val: checked on Linux"}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 def main():

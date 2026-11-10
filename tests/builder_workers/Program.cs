@@ -15,8 +15,8 @@ static class Program
         checks++;
     }
 
-    static ProcessStartInfo Info(Tools tools, string[] args, int? workers = null) =>
-        (ProcessStartInfo)InfoMethod.Invoke(null, new object?[] { tools, args, workers, null })!;   // (ngxSdk: none)
+    static ProcessStartInfo Info(Tools tools, string[] args, int? workers = null, int? memoryGb = null) =>
+        (ProcessStartInfo)InfoMethod.Invoke(null, new object?[] { tools, args, workers, null, memoryGb })!;   // (ngxSdk: none)
 
     static async Task<JsonElement> Delivery(ProcessStartInfo info)
     {
@@ -92,7 +92,7 @@ static class Program
             // This is authored test content, not the real pipeline, game files or a compiler invocation.
             File.WriteAllText(Path.Combine(root, "nx2", "make_game.py"), """
                 import json, os, sys
-                text = json.dumps({'argv': sys.argv[1:], 'jobs': os.environ.get('HOOKSHOT_JOBS')})
+                text = json.dumps({'argv': sys.argv[1:], 'jobs': os.environ.get('HOOKSHOT_JOBS'), 'memory': os.environ.get('HOOKSHOT_MEM_LIMIT_GB')})
                 print(('@@check ok ' if '--check' in sys.argv else '') + text, flush=True)
                 """);
             var tools = new Tools(root, python);
@@ -117,6 +117,46 @@ static class Program
             {
                 try { new Runner(tools, new List<string>(), invalid); throw new Exception("Invalid worker count accepted."); }
                 catch (ArgumentOutOfRangeException) { checks++; }
+            }
+
+            Require(BuildMemory.Choices(32).SequenceEqual(new object[] { BuildMemory.Automatic, 4, 8, 12, 16, 20, 24, 28, 32 }),
+                "The memory menu must offer Automatic first, then steps up to the PC's memory.");
+            Require(BuildMemory.Choices(64).Count() == 17 && BuildMemory.Choices(64).Last() is 64,
+                "A 64 GB PC must be offered every step up to 64.");
+            Require(BuildMemory.Choices(31).Last() is 32 && BuildMemory.Choices(8).Last() is 8,
+                "The memory menu must end on the step at or just above the PC's memory.");
+            Require(BuildMemory.Choices(0).SequenceEqual(new object[] { BuildMemory.Automatic }), "An unknown total must still offer Automatic.");
+            Require(BuildMemory.TotalGb() > 0, "The PC's memory could not be read.");
+            Require(BuildMemory.Selected(BuildMemory.Automatic) is null && BuildMemory.Selected(8) == 8, "Memory selection failed.");
+            var menu = BuildMemory.Choices(32).ToList();
+            Require(BuildMemory.Saved(menu, 12) is 12, "A saved memory choice must be selected again.");
+            Require(BuildMemory.Saved(menu, null) is string none && none == BuildMemory.Automatic, "No saved choice must select Automatic.");
+            Require(BuildMemory.Saved(menu, 64) is string gone && gone == BuildMemory.Automatic, "A choice this PC no longer offers must select Automatic.");
+            var settings = Path.Combine(Path.GetTempPath(), "hookshot-builder-settings-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                File.WriteAllText(settings, System.Text.Json.JsonSerializer.Serialize(new BuilderSettings { MemoryGb = 16 }));
+                Require(BuilderSettings.Load(settings)?.MemoryGb == 16, "The memory choice must be saved for the updates.");
+                File.WriteAllText(settings, "{\"Dlss\":true}");
+                Require(BuilderSettings.Load(settings) is { MemoryGb: null }, "Settings saved before the memory choice must mean Automatic.");
+            }
+            finally { File.Delete(settings); }
+            foreach (var invalid in new object?[] { null, "8", "automatic", 0, -4, 8L, new object() })
+            {
+                try { BuildMemory.Selected(invalid); throw new Exception("Invalid memory selection accepted."); }
+                catch (ArgumentException e) { Require(e.Message.Contains("Automatic"), "Invalid memory choice needs an actionable message."); }
+            }
+            foreach (var invalid in new[] { 0, -4 })
+            {
+                try { new Runner(tools, new List<string>(), null, null, invalid); throw new Exception("Invalid memory accepted."); }
+                catch (ArgumentOutOfRangeException) { checks++; }
+            }
+            {
+                var command = new[] { "--update", "authored existing game" };
+                Info(tools, command).Environment.TryGetValue("HOOKSHOT_MEM_LIMIT_GB", out var automatic);
+                Require(automatic == Environment.GetEnvironmentVariable("HOOKSHOT_MEM_LIMIT_GB"), "Automatic must leave the memory limit as inherited.");
+                var value = await Delivery(Info(tools, command, null, 12));
+                Require(value.GetProperty("memory").GetString() == "12", "The selected memory did not reach the child.");
             }
 
             var sourceArguments = new[]

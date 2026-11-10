@@ -8,7 +8,9 @@ sealed class BuilderSettings
     public string? Romfs { get; set; }
     public string? Exefs { get; set; }
     public bool Dlss { get; set; }   // (NVIDIA DLSS ticked: NVIDIA's license was accepted)
+    public bool Fsr { get; set; }    // (AMD FSR 4 ticked)
     public bool PrepareLater { get; set; }   // ("Prepare shaders now" unticked)
+    public int? MemoryGb { get; set; }   // (Build memory; null: Automatic. The updates use it too, as they show no menu)
 
     public static BuilderSettings? Load(string path)
     {

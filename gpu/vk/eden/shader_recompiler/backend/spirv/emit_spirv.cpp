@@ -496,7 +496,7 @@ void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ct
     if ((!profile.support_vertex_instance_id &&
          (info.loads[IR::Attribute::InstanceId] || info.loads[IR::Attribute::VertexId])) ||
         info.loads[IR::Attribute::BaseInstance] || info.loads[IR::Attribute::BaseVertex] ||
-        info.loads[IR::Attribute::DrawID] || ctx.wants_mesh_first) {   // (hookshot: a task program's DrawIndex, its draw's first)
+        info.loads[IR::Attribute::DrawID] || (ctx.wants_mesh_first && !ctx.mesh_fallback)) {
         ctx.AddExtension("SPV_KHR_shader_draw_parameters");
         ctx.AddCapability(spv::Capability::DrawParameters);
     }

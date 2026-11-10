@@ -217,7 +217,8 @@ def _https(url):
 
 
 def _request(url, timeout, limit=MAX_DOWNLOAD):
-    req = urllib.request.Request(_https(url), url, headers={"User-Agent": "Hookshot", "Accept": "application/vnd.github+json"})
+    # (no second argument: Request's second is the POST body, and a str body failed every download before connecting)
+    req = urllib.request.Request(_https(url), headers={"User-Agent": "Hookshot", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return _read_at_most(response, limit)
 
@@ -343,6 +344,14 @@ def _check_part_directory(path):
 def _symlink(root, link_to, target):
     # The whole staging tree is the boundary: a valid toolchain link may name a different part or a later entry.
     root = os.path.abspath(root)
+    # (".." only at the start: "x/../.." is checked as written, but the system resolves x first, and x may be a link the
+    # same zip or a later part makes, so the check and the system would disagree)
+    parts = link_to.split("/")
+    ups = 0
+    while ups < len(parts) and parts[ups] == "..":
+        ups += 1
+    if ".." in parts[ups:]:
+        raise ValueError("an update symlink climbs after a name: %s -> %s" % (target, link_to))
     destination = os.path.abspath(os.path.join(os.path.dirname(target), link_to))
     real_root = os.path.realpath(root)
     if (is_absolute_link(link_to) or os.path.commonpath((root, destination)) != root or
@@ -398,7 +407,8 @@ def _unpack(data, dest, files, rebase_sysroot=False, root=None):
                 with open(target, "xb") as out:
                     out.write(zipped.read(info))
                 if mode & 0o777:
-                    os.chmod(target, mode & 0o777)
+                    # (the modes the parts are made with: no group- or world-writable files from a zip)
+                    os.chmod(target, 0o755 if mode & 0o111 else 0o644)
     _finish_sysroot_links(dest, rooted_links)
 
 
@@ -432,8 +442,22 @@ def _place(part, source_root, source, dest_root, get, note):
     _unpack(data, dest, part.files, rebase_sysroot, staging_root)
 
 
+def _check_links_inside(dest):
+    """Every link in the finished staging tree resolves inside it, whatever order the parts made them in."""
+    real = os.path.realpath(dest)
+    for dirpath, dirnames, filenames in os.walk(dest, followlinks=False):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path) and os.path.commonpath((real, os.path.realpath(path))) != real:
+                raise ValueError("an update symlink leaves its staging folder: %s" % path)
+
+
 def _finish_tree(dest):
     """AppRun at the root, from the tools just installed, so this folder starts the way the AppImage does."""
+    _check_links_inside(dest)
+    for name in ("AppRun", "hookshot.png", "hookshot-builder.desktop"):
+        if os.path.islink(os.path.join(dest, name)):   # (written below: never through a link a part made)
+            raise ValueError("the update has a link where %s goes" % name)
     tools = os.path.join(dest, "usr", "share", "hookshot")
     apprun = os.path.join(dest, "AppRun")
     shutil.copyfile(os.path.join(tools, "builder", "linux", "AppRun"), apprun)

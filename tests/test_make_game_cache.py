@@ -309,6 +309,24 @@ class RomfsCopyTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"authored read-only asset")
             self.assertFalse(source.stat().st_mode & stat.S_IWRITE)
 
+    def test_links_in_an_extracted_dump_are_refused(self):
+        # (a link in --romfs or --exefs was followed: the file it named was hard-linked or copied into the game folder)
+        with tempfile.TemporaryDirectory(prefix="hookshot-dump-links-") as folder:
+            src, secret = Path(folder) / "romfs", Path(folder) / "secret"
+            (src / "Model").mkdir(parents=True)
+            (src / "Model" / "a.zs").write_bytes(b"game data")
+            secret.write_bytes(b"not the game's")
+            make_game.refuse_dump_links(src)   # (plain files and folders)
+            for name, target in (("b.zs", secret), ("Link", Path(folder))):
+                link = src / "Model" / name
+                try:
+                    link.symlink_to(target)
+                except OSError:
+                    self.skipTest("no symbolic links here")
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                    make_game.refuse_dump_links(src)
+                link.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

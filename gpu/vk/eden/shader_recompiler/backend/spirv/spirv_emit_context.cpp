@@ -528,7 +528,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineCommonConstants();
     DefineInterfaces(program);
     // (RX_VK_MESH_FIRST=1, with RX_VK_MESH_ARGS=1: off, one task program with it hung or ended the game at its first draw)
-    if (stage == Stage::Task && getenv("RX_VK_MESH_FIRST") && profile.unified_descriptor_binding && profile.support_int64) {
+    if (stage == Stage::Task && !runtime_info.mesh_fallback && getenv("RX_VK_MESH_FIRST") &&
+        profile.unified_descriptor_binding && profile.support_int64) {
         // (hookshot) the draw's first task workgroup, read through a pushed address (EmitIsbeRead)
         if (!Sirit::ValidId(U64)) { AddCapability(spv::Capability::Int64); U64 = Name(TypeInt(64, false), "u64"); }
         wants_mesh_first = true;
@@ -551,6 +552,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     if (runtime_info.mesh_fallback && (stage == Stage::Task || stage == Stage::Mesh)) {
         mesh_fallback = true;
         wants_mesh_fallback = true;
+        wants_mesh_first = stage == Stage::Task;
         // (the push block is made below, before DefineGlobalMemoryFunctions can ask for the page table: a fallback stage
         // that follows pointers needs its member now, or the block would be made without it)
         wants_guest_pages = program.info.uses_global_memory && profile.support_int64;
@@ -1588,7 +1590,7 @@ void EmitContext::DefineRescalingInputPushConstant() {
         guest_pages_member_index = member_index++;
     }
     if (wants_mesh_first) {
-        members.push_back(U64);
+        members.push_back(mesh_fallback ? U32[1] : U64);
         mesh_first_member_index = member_index++;
     }
     if (wants_mesh_fallback) {
@@ -1596,6 +1598,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
         mesh_fallback_payload_member_index = member_index++;
         members.push_back(U64);
         mesh_fallback_records_member_index = member_index++;
+        if (stage == Stage::Task) {
+            members.push_back(U64);
+            mesh_fallback_indirect_input_member_index = member_index++;
+        }
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1624,15 +1630,16 @@ void EmitContext::DefineRescalingInputPushConstant() {
         MemberName(push_constant_struct, mesh_first_member_index, "mesh_first");
     }
     if (wants_mesh_fallback) {
-        const std::array<std::pair<u32, u32>, 2> fallback_members{{
-            {mesh_fallback_payload_member_index, MESH_FALLBACK_PAYLOAD_PUSH_OFFSET},
-            {mesh_fallback_records_member_index, MESH_FALLBACK_RECORDS_PUSH_OFFSET},
-        }};
-        for (const auto& [member, offset] : fallback_members) {
-            MemberDecorate(push_constant_struct, member, spv::Decoration::Offset, offset);
-        }
+        MemberDecorate(push_constant_struct, mesh_fallback_payload_member_index, spv::Decoration::Offset,
+                       MESH_FALLBACK_PAYLOAD_PUSH_OFFSET);
+        MemberDecorate(push_constant_struct, mesh_fallback_records_member_index, spv::Decoration::Offset,
+                       MESH_FALLBACK_RECORDS_PUSH_OFFSET);
         MemberName(push_constant_struct, mesh_fallback_payload_member_index, "mesh_fallback_payload");
         MemberName(push_constant_struct, mesh_fallback_records_member_index, "mesh_fallback_records");
+        if (stage == Stage::Task) {
+            MemberDecorate(push_constant_struct, mesh_fallback_indirect_input_member_index, spv::Decoration::Offset,
+                           MESH_FALLBACK_INDIRECT_INPUT_PUSH_OFFSET);
+        }
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);

@@ -100,7 +100,8 @@ class NxImage:
                 if r["type"] == "RELATIVE":
                     v = m.base + r["addend"]
                 elif r["type"] in ("ABS64", "GLOB_DAT", "JUMP_SLOT"):
-                    v = self.resolve(r["sym"], bind.get(r["sym"]) == "weak") + (r["addend"] if r["type"] == "ABS64" else 0)
+                    # S + A for all three (AArch64 ELF ABI; rtld writes the same: symbol address + r_addend)
+                    v = self.resolve(r["sym"], bind.get(r["sym"]) == "weak") + r["addend"]
                 else:
                     raise SystemExit(f"{m.name}: relocation type {r['type']} at {r['offset']:#x} not supported")
                 struct.pack_into("<Q", self.mem, at, v & 0xFFFFFFFFFFFFFFFF)

@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 WATCHES = {"RX_NVN_WATCH_TEX": "64x64", "RX_NVN_WATCH_TEXELS_SRC": "64x64",
            "RX_VK_WATCH_CPU": "0:1000", "RX_VK_VERIFY_DIM": "64x64"}

@@ -1,5 +1,9 @@
 # Notes for AI coding agents
 
+**Start with [docs/workflow.md](docs/workflow.md):** what to work on first (severity x reach x confidence, reach from
+the hardware people run), the hardware tiers a change must not break, and the steps from claim to release. The open work, scored and sorted,
+is in [docs/worklist.md](docs/worklist.md): pick from its top.
+
 Follow [CONTRIBUTING.md](CONTRIBUTING.md): its rules apply to agents as to everyone, above all that no game files or
 anything made from them leave the PC. The [development guide](docs/development.md) has the layout and the commands; the
 [design notes](docs/design.md) have the architecture and the rules the GPU replay keeps.

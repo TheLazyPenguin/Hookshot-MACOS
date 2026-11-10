@@ -59,7 +59,10 @@ class BuildHarness:
             "sys": sys, "make_game": make_game,
             # (toolchain.default_jobs is only asked for RX_JOBS now: it answers RX_JOBS as the real one does)
             "toolchain": SimpleNamespace(default_jobs=lambda: max(1, int(self.environ["RX_JOBS"]))),
-            "messagebox": SimpleNamespace(showerror=lambda title, text: self.events.append(("error", title, text))),
+            "messagebox": SimpleNamespace(showerror=lambda title, text: self.events.append(("error", title, text)),
+                                          askokcancel=lambda title, text: True),
+            # (the hard drive warning is asked first: these builds are on a folder that is not a hard drive)
+            "slow_disk_warning": lambda folder: None,
             "save_config": lambda cfg: self.events.append(("save", dict(cfg))),
             "time": SimpleNamespace(time=lambda: 123.0),
             "subprocess": SimpleNamespace(Popen=start_process, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT),

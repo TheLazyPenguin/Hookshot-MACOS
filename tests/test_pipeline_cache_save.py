@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 import unittest
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = None
 BASELINE = None
@@ -95,6 +97,15 @@ class PipelineCacheSaveTests(unittest.TestCase):
 
     def test_forced_wait_preserves_existing_single_waiter_behavior(self):
         self.check_case('forced-wait')
+
+    def test_unchanged_data_is_not_written_again(self):
+        # The precompile's pipelines, all found in the cache, count towards a save: data of the size read or last written
+        # is not fetched nor written again; a write that did not land is tried again.
+        self.check_case('unchanged')
+        if BASELINE:
+            result = self.run_case('unchanged', original=True)
+            self.assertNotEqual(result.returncode, 0, 'the original rewrites unchanged data')
+            self.assertIn('FAIL line', result.stderr)
 
     def check_case(self, case):
         result = self.run_case(case)

@@ -4,6 +4,7 @@
 
 #ifdef __cplusplus
 #include <cmath>
+#include <limits>
 #include <utility>
 #endif
 
@@ -54,8 +55,10 @@ static inline int dlss_jitter_phases(unsigned render_w, unsigned render_h, unsig
 namespace mkwvk::dlss_math {
 
 /// This frame's clip space to the frame before's: previous * inverse(current), both row major (clip = M * position); false
-/// when current is singular or the result is not finite
+/// when either input is not finite, current is singular, or the result cannot be represented as finite floats
 inline bool reprojection(const float* current, const float* previous, float out[16]) {
+    for (int i = 0; i < 16; i++)
+        if (!std::isfinite(current[i]) || !std::isfinite(previous[i])) return false;
     double a[4][8];
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 8; c++) a[r][c] = c < 4 ? current[r * 4 + c] : (c - 4 == r ? 1.0 : 0.0);
@@ -78,7 +81,7 @@ inline bool reprojection(const float* current, const float* previous, float out[
         for (int c = 0; c < 4; c++) {
             double v = 0;
             for (int k = 0; k < 4; k++) v += previous[r * 4 + k] * a[k][c + 4];
-            if (!std::isfinite(v)) return false;
+            if (!std::isfinite(v) || std::fabs(v) > std::numeric_limits<float>::max()) return false;
             out[r * 4 + c] = (float)v;
         }
     return true;

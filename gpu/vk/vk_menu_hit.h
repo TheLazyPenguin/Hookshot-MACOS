@@ -47,6 +47,20 @@ inline int slider_permille(int v, int lo, int hi) {
     return p < 0 ? 0 : p > 1000 ? 1000 : p;
 }
 
+/// What a left click on an option's row does after it selects the row (side: the Hit's): kClickSelect nothing more, kClickRight
+/// and kClickLeft as Right and Left, kClickConfirm as Enter. The name only selects the row and shows its help: a click there
+/// used to change the value as Right, so clicking "Output resolution" to read about it moved it a step, and closing the menu
+/// asked to restart. A choice's halves lower and raise it; a toggle's halves are its two values (left lo, right hi), so the half already
+/// chosen leaves it as it is (on: the toggle is at hi) and the other flips it. A row without a value (a page, Restart, Quit)
+/// opens
+enum RowClick { kClickLeft = -1, kClickSelect = 0, kClickRight = 1, kClickConfirm = 2 };
+inline RowClick row_click(bool has_value, bool toggle, int side, bool on = false) {
+    if (!has_value) return kClickConfirm;
+    if (side == 0) return kClickSelect;
+    if (toggle) return (side > 0) == on ? kClickSelect : kClickRight;   // (a toggle's Right flips it either way)
+    return side > 0 ? kClickRight : kClickLeft;
+}
+
 /// The controls as last drawn
 struct Map {
     struct Box {

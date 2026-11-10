@@ -147,7 +147,7 @@
 #define VKX_DEVICE3(X) \
     X(vkCmdDrawMeshTasksIndirectCountEXT) X(vkCmdPushDescriptorSetKHR) X(vkCreateBufferView) X(vkDestroyBufferView) \
     X(vkDestroySampler) X(vkDestroyDescriptorSetLayout) X(vkDestroyPipelineLayout) X(vkDestroyDescriptorPool) \
-    X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) X(vkCmdFillBuffer) \
+    X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) X(vkMergePipelineCaches) X(vkCmdFillBuffer) \
     X(vkCmdResolveImage) X(vkCmdBeginConditionalRenderingEXT) X(vkCmdEndConditionalRenderingEXT) \
     X(vkCmdSetLineWidth) X(vkCmdSetDepthClampEnableEXT) X(vkCmdSetPolygonModeEXT) X(vkCmdSetColorWriteMaskEXT) \
     X(vkCmdSetColorBlendEnableEXT) X(vkCmdSetColorBlendEquationEXT) X(vkCmdSetLogicOpEnableEXT) \

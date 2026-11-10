@@ -1,0 +1,516 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Hookshot",
+  "repo": "NotRexed/Hookshot",
+  "game": {
+    "kind": "iso_or_folder",
+    "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, version 131072 (build e0f3ccfa): the .nup file, or the folder that holds its romfs and exefs.",
+    "check": {
+      "nup_build_id": "e0f3ccfa"
+    }
+  },
+  "start": {
+    "program": [
+      "Hookshot.AppImage",
+      "HookshotBuilder.exe"
+    ],
+    "args": [
+      "--play",
+      "{home}/Games/Hookshot"
+    ]
+  },
+  "prepare": {
+    "program": [
+      "Hookshot.AppImage",
+      "HookshotBuilder.exe"
+    ],
+    "args": [
+      "--cli",
+      "--prepare",
+      "--game",
+      "{game}"
+    ],
+    "label": "Building the game from your copy (10 to 45 minutes)",
+    "timeout": 7200
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        {
+          "path": "{home}/Games/Hookshot/hookshot_options.ini"
+        }
+      ]
+    }
+  ],
+  "saves": [
+    "{local}/hookshot",
+    "{home}/Games/Hookshot/user"
+  ],
+  "folders": {
+    "saves": [
+      {
+        "path": "{home}/Games/Hookshot/user",
+        "if": "{home}/Games/Hookshot/user"
+      },
+      {
+        "path": "{local}/hookshot"
+      }
+    ],
+    "game": [
+      {
+        "path": "{home}/Games/Hookshot"
+      }
+    ]
+  },
+  "settings": [
+    {
+      "id": "preset",
+      "label": "Quality preset",
+      "help": "Sets resolution, upscaling, frame generation and the video memory limits for a card with that much memory. Changing most other rows yourself sets it back to Custom.",
+      "choices": [
+        {
+          "label": "Custom",
+          "set": {
+            "quality_preset": "0"
+          }
+        },
+        {
+          "label": "Minimum (4 GB)",
+          "set": {
+            "quality_preset": "1"
+          }
+        },
+        {
+          "label": "Low (6 GB)",
+          "set": {
+            "quality_preset": "2"
+          }
+        },
+        {
+          "label": "Balanced (8 GB)",
+          "set": {
+            "quality_preset": "3"
+          }
+        },
+        {
+          "label": "High (12 GB)",
+          "set": {
+            "quality_preset": "4"
+          }
+        },
+        {
+          "label": "Ultra (16 GB+)",
+          "set": {
+            "quality_preset": "5"
+          }
+        }
+      ],
+      "defaults": {
+        "quality_preset": "0"
+      }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Fullscreen",
+      "help": "Fills the screen with the game, without the window's border.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "fullscreen": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "fullscreen": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "fullscreen": "0"
+      }
+    },
+    {
+      "id": "framegen",
+      "label": "Frame generation",
+      "help": "Makes extra frames between the game's own for smoother motion. It adds a little input delay, and fast motion can show artifacts.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "frame_generation": "0"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "frame_generation": "2"
+          }
+        },
+        {
+          "label": "3x",
+          "set": {
+            "frame_generation": "3"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "frame_generation": "4"
+          }
+        },
+        {
+          "label": "6x",
+          "set": {
+            "frame_generation": "6"
+          }
+        },
+        {
+          "label": "8x",
+          "set": {
+            "frame_generation": "8"
+          }
+        }
+      ],
+      "defaults": {
+        "frame_generation": "0"
+      }
+    },
+    {
+      "id": "pacing",
+      "label": "Frame pacing",
+      "help": "Shows each frame at an even interval. Less stutter, at up to one frame of delay.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "frame_pacing": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "frame_pacing": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "frame_pacing": "0"
+      }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "help": "How sharp the 3D is drawn. Auto lets the game lower it when the graphics card is busy.",
+      "choices": [
+        {
+          "label": "Auto",
+          "set": {
+            "resolution": "0"
+          }
+        },
+        {
+          "label": "100%",
+          "set": {
+            "resolution": "1"
+          }
+        },
+        {
+          "label": "75%",
+          "set": {
+            "resolution": "2"
+          }
+        },
+        {
+          "label": "67%",
+          "set": {
+            "resolution": "3"
+          }
+        },
+        {
+          "label": "50%",
+          "set": {
+            "resolution": "4"
+          }
+        }
+      ],
+      "defaults": {
+        "resolution": "0"
+      }
+    },
+    {
+      "id": "output",
+      "label": "Output resolution",
+      "help": "The size of the game's whole frame before it is scaled to your window. Applies after a restart.",
+      "choices": [
+        {
+          "label": "2048x1152",
+          "set": {
+            "output_res": "2048x1152"
+          }
+        },
+        {
+          "label": "2560x1440",
+          "set": {
+            "output_res": "2560x1440"
+          }
+        },
+        {
+          "label": "3840x2160",
+          "set": {
+            "output_res": "3840x2160"
+          }
+        }
+      ],
+      "defaults": {
+        "output_res": "2048x1152"
+      }
+    },
+    {
+      "id": "upscaling",
+      "label": "Upscaling",
+      "help": "The filter that scales the picture to your window. Lanczos is the sharpest.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "upscaling": "0"
+          }
+        },
+        {
+          "label": "Catmull-Rom",
+          "set": {
+            "upscaling": "1"
+          }
+        },
+        {
+          "label": "Lanczos",
+          "set": {
+            "upscaling": "2"
+          }
+        }
+      ],
+      "defaults": {
+        "upscaling": "0"
+      }
+    },
+    {
+      "id": "sharpness",
+      "label": "Sharpness",
+      "help": "Sharpens the picture on its way to the window. Too much shows halos around edges.",
+      "choices": [
+        {
+          "label": "0%",
+          "set": {
+            "sharpness": "0"
+          }
+        },
+        {
+          "label": "30%",
+          "set": {
+            "sharpness": "30"
+          }
+        },
+        {
+          "label": "60%",
+          "set": {
+            "sharpness": "60"
+          }
+        },
+        {
+          "label": "100%",
+          "set": {
+            "sharpness": "100"
+          }
+        }
+      ],
+      "defaults": {
+        "sharpness": "0"
+      }
+    },
+    {
+      "id": "handheld",
+      "label": "Handheld profile",
+      "help": "Runs the game as if the console were undocked: lower resolution, lighter on the graphics card. Applies after a restart.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "handheld_profile": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "handheld_profile": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "handheld_profile": "0"
+      }
+    },
+    {
+      "id": "ultrawide",
+      "label": "Ultrawide",
+      "help": "Monitor's shape widens the camera to fill a screen wider than 16:9. The HUD stays stretched. Applies after a restart.",
+      "choices": [
+        {
+          "label": "16:9",
+          "set": {
+            "ultrawide": "0"
+          }
+        },
+        {
+          "label": "Monitor's shape",
+          "set": {
+            "ultrawide": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "ultrawide": "0"
+      }
+    },
+    {
+      "id": "fps",
+      "label": "FPS counter",
+      "help": "Shows frames per second in the top right corner.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "fps_counter": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "fps_counter": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "fps_counter": "0"
+      }
+    },
+    {
+      "id": "speed",
+      "label": "Game speed",
+      "help": "Per frame slows the game down whenever it runs below 60 fps. Real time keeps normal speed down to 15 fps.",
+      "choices": [
+        {
+          "label": "Per frame",
+          "set": {
+            "game_speed": "0"
+          }
+        },
+        {
+          "label": "Real time",
+          "set": {
+            "game_speed": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "game_speed": "1"
+      }
+    },
+    {
+      "id": "text",
+      "label": "Text speed",
+      "help": "How fast dialogue appears. Instant shows each page at once.",
+      "choices": [
+        {
+          "label": "Normal",
+          "set": {
+            "text_speed": "0"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "text_speed": "1"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "text_speed": "2"
+          }
+        },
+        {
+          "label": "Instant",
+          "set": {
+            "text_speed": "3"
+          }
+        }
+      ],
+      "defaults": {
+        "text_speed": "0"
+      }
+    },
+    {
+      "id": "background",
+      "label": "Controller in background",
+      "help": "Keeps the controller working while another window has the focus.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "controller_in_background": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "controller_in_background": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "controller_in_background": "0"
+      }
+    },
+    {
+      "id": "mousecam",
+      "label": "Mouse camera",
+      "help": "Native turns the camera with the mouse one to one. As the stick uses the mouse in place of the right stick.",
+      "choices": [
+        {
+          "label": "As the stick",
+          "set": {
+            "mouse_camera": "0"
+          }
+        },
+        {
+          "label": "Native",
+          "set": {
+            "mouse_camera": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "mouse_camera": "0"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "id": "saves",
+      "label": "Saves",
+      "help": "Where your saves are kept.",
+      "open": "saves"
+    },
+    {
+      "id": "game",
+      "label": "Game folder",
+      "help": "The built game, with its log and mods folder.",
+      "open": "game"
+    }
+  ]
+}

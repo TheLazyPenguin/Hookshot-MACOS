@@ -1,5 +1,6 @@
 """The temporal upscalers' camera jitter for Ocarina of Time 1.1.1: C added after a few instructions of the game (a64_lift.py
-Lifter.after). One jitter for both: NVIDIA DLSS (gpu/vk/vk_dlss.cpp) and AMD FSR 3.1 (gpu/vk/vk_fsr3_inputs.cpp).
+Lifter.after). One jitter for all of them: NVIDIA DLSS and AMD FSR 4 (gpu/vk/vk_temporal.cpp, the frame chain they share) and
+AMD FSR 3.1 (gpu/vk/vk_fsr3_inputs.cpp).
 
 A temporal upscaler resolves detail finer than a pixel from frames whose camera moved by a different fraction of a
 pixel each time. The game's cameras do not move so: these sites give the scene's projection a sub-pixel offset each frame,
@@ -16,7 +17,7 @@ moved by a sixth of a shadow texel each frame (up to a third; 0.003 without the 
 the game set it.
 
 host/rx_backend.c hos_dlss_jitter_clip picks the jitter and checks the projection is one of the picture's: perspective, of
-16:9 or the window's ratio (nx2/oot_wide.py). It is none (the game as shipped) unless DLSS or FSR 3.1 runs (the renderer's
+16:9 or the window's ratio (nx2/oot_wide.py). It is none (the game as shipped) unless DLSS or an FSR runs (the renderer's
 rx_option HOS_OPT_DLSS_JITTER_W and _H are 0 otherwise), and the renderer reads the offset back from the camera's uniform
 buffer. Which view is the scene's, the renderer learns from its draws, too late for
 this: the other views of the picture's ratio (a reflection, a portrait) are drawn without DLSS and move by under a pixel

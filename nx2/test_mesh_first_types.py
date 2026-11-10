@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--headers", "{spirv_headers}"]
+
 ROOT=Path(__file__).resolve().parents[1]
 
 
@@ -21,7 +23,7 @@ def block(text,marker):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--headers',type=Path,required=True);p.add_argument('--cxx',default='clang++');a=p.parse_args()
     vk=ROOT/'gpu/vk';source=(vk/'eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp').read_text(encoding='utf-8')
-    setup=block(source,'if (stage == Stage::Task && getenv("RX_VK_MESH_FIRST")')
+    setup=block(source,'if (stage == Stage::Task && !runtime_info.mesh_fallback && getenv("RX_VK_MESH_FIRST")')
     fixture=r'''
 #include <sirit/sirit.h>
 #include <array>
@@ -35,6 +37,7 @@ struct EmitContext;
 Id DefineInput(EmitContext&,Id,bool,spv::BuiltIn);
 struct EmitContext:Sirit::Module {
     struct { bool unified_descriptor_binding=true,support_int64=true; } profile;
+    struct { bool mesh_fallback=false; } runtime_info;
     Stage stage=Stage::Task;std::array<Id,2> U32{};Id U64{},draw_index{},mesh_first_block_pointer{},mesh_first_member_pointer{};
     bool wants_mesh_first=false,wants_guest_pages=false;unsigned pushes=0;
     EmitContext(bool had64):Module(0x00010600) {
@@ -53,11 +56,12 @@ struct EmitContext:Sirit::Module {
 Id DefineInput(EmitContext& ctx,Id type,bool,spv::BuiltIn){return ctx.Constant(type,0U);}
 int main() {
     unsigned cases=0;const bool requested=std::getenv("RX_VK_MESH_FIRST")!=nullptr;
-    for(unsigned i=0;i<5;i++) {
+    for(unsigned i=0;i<6;i++) {
         EmitContext ctx{i==1};const Id before=ctx.U64;
         if(i==2)ctx.stage=Stage::Compute;
         if(i==3)ctx.profile.unified_descriptor_binding=false;
         if(i==4)ctx.profile.support_int64=false;
+        if(i==5)ctx.runtime_info.mesh_fallback=true;
         try{ctx.Enable(Program{});}catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}
         const bool enabled=requested && i<2;
         if(ctx.wants_mesh_first!=enabled || ctx.pushes!=(enabled?1:0))return 2;

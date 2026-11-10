@@ -17,6 +17,7 @@
    HOS_AUDIO_CHANNELS=2 or 6: stereo or 5.1 whatever the default output has and the Insert menu's Audio output say
    (see au_speakers). */
 #include "hos.h"
+#include "../gpu/vk/vk_api.h"   /* (the Audio tab's options: HOS_OPT_VOLUME, HOS_OPT_MUTE_BACKGROUND) */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1030,6 +1031,57 @@ static int64_t audio_mix_deadline(int64_t now, int64_t next, int64_t period) {
     return next;
 }
 
+/* ---- the player's volume (the Insert menu's Audio tab, gpu/vk/vk_menu.cpp) ------------------------------------- */
+/* The frame's samples (frames x channels, interleaved) scaled from `from`, the gain the last frame ended at, to `want`,
+   step by step over the frame, so a change does not click. The gains are 0 to 1: nothing clips. Returns the gain the
+   frame ended at. tests/test_audio_volume.py */
+static float audio_apply_gain(int16_t *pcm, int frames, int channels, float from, float want) {
+    if (from == 1.0f && want == 1.0f) return want;
+    for (int i = 0; i < frames; i++) {
+        const float g = from + (want - from) * (float)(i + 1) / (float)frames;
+        for (int c = 0; c < channels; c++) pcm[i * channels + c] = (int16_t)lrintf((float)pcm[i * channels + c] * g);
+    }
+    return want;
+}
+
+/* Whether the game's window counts as in front, as host/nn_hid.c's game_in_front decides it: the game's own window does,
+   another normal window does not, and an overlay (a tool or no-activate window: Steam's, Discord's, but also a toast or
+   a tray flyout) counts as the game's only while the last normal window in front was the game's. *last_normal_was_us
+   keeps that between calls. tests/test_audio_volume.py */
+static int audio_front_decide(int ours, int overlay, int *last_normal_was_us) {
+    if (ours) return *last_normal_was_us = 1;
+    if (overlay && *last_normal_was_us) return 1;
+    *last_normal_was_us = 0;
+    return 0;
+}
+static int audio_window_in_front(void) {   /* (the mixer thread's only: its own state, not game_in_front's) */
+    static int last_normal_was_us = 1;
+    DWORD pid = 0;
+    HWND w = GetForegroundWindow();
+    if (!w) return 0;
+    GetWindowThreadProcessId(w, &pid);
+    const int ours = pid == GetCurrentProcessId();
+    const int overlay = !ours && (GetWindowLongPtrA(w, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0;
+    return audio_front_decide(ours, overlay, &last_normal_was_us);
+}
+
+/* The Volume row's percent (0 to 100) as a gain (0 to 1), on a squared curve so the slider's steps sound about even: 50%
+   is a quarter, -12 dB. A straight line left the bottom half of the slider nearly all very quiet. */
+static float audio_volume_curve(int percent) {
+    const float v = (float)(percent < 0 ? 0 : percent > 100 ? 100 : percent) / 100.0f;
+    return v * v;
+}
+/* The gain the menu asks for: Volume and Mute in background. With no menu (the WebGPU renderer) the game plays at full
+   volume. */
+static float audio_player_gain(void) {
+    int rx_option(int id, int otherwise);
+    int volume = rx_option(HOS_OPT_VOLUME, 100);
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    if (volume && rx_option(HOS_OPT_MUTE_BACKGROUND, 0) && !audio_window_in_front()) volume = 0;
+    return audio_volume_curve(volume);
+}
+
 /* ---- the renderer thread --------------------------------------------------------------------------------------- */
 static uint64_t renderer_event;
 static volatile int renderer_running;
@@ -1042,6 +1094,8 @@ static DWORD WINAPI renderer_main(void *p) {
     output_open();
     int64_t period = 5000000, next = hos_now_ns() + period;   /* one audio frame: 240 samples at 48 kHz */
     static int16_t pcm[FRAME * OUT_MAX_CH];
+    float gain = 1.0f, gain_want = 1.0f;
+    int gain_frames = 0;
     for (;;) {
         hos_sleep_ns(next - hos_now_ns());
         next = audio_mix_deadline(hos_now_ns(), next, period);
@@ -1050,6 +1104,8 @@ static DWORD WINAPI renderer_main(void *p) {
         if (ncmds && hos_now_ns() - last_update_ns > 50000000) commit();   /* (no update came: see "parameter updates") */
         render_frame(pcm, out_channels);
         au_unlock();
+        if (gain_frames-- <= 0) gain_want = audio_player_gain(), gain_frames = 20;   /* (the menu read every 100 ms) */
+        gain = audio_apply_gain(pcm, FRAME, out_channels, gain, gain_want);
         output_frame(pcm);
         elapsed_frames++;
         if (renderer_event) hos_system_event_signal(renderer_event);

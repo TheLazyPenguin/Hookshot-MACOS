@@ -25,7 +25,8 @@ class ShaderCensusCommandTests(unittest.TestCase):
         cmd = make_game.shader_census_cmd("/tmp/romfs", "/tmp/out/hookshot_shaders.bin")
         self.assertEqual(cmd[:5], [sys.executable, "-I", "-u", "-X", "utf8"])
         self.assertTrue(cmd[5].endswith("shader_census.py"))
-        self.assertEqual(cmd[6:], ["/tmp/romfs", "--out", "/tmp/out/hookshot_shaders.bin"])
+        # (the romfs as a long path on Windows, #1468; as given elsewhere)
+        self.assertEqual(cmd[6:], [make_game.long_path("/tmp/romfs"), "--out", "/tmp/out/hookshot_shaders.bin"])
         old = [sys.executable, "-I", cmd[5], "/tmp/romfs", "--out", "/tmp/out/hookshot_shaders.bin"]
         self.assertNotEqual(cmd, old)
 

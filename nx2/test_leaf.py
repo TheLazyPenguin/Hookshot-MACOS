@@ -56,6 +56,12 @@ import numpy as np
 import unicorn
 from unicorn import arm64_const as A
 
+# (the game: this runs the lifted code of a real dump against Unicorn)
+RUN_ALL_SKIP = {
+    "linux": "needs the game's modules (work/dump) and Unicorn",
+    "windows": "needs the game's modules (work/dump) and Unicorn",
+}
+
 insn.install()
 lift_fixes.install()
 poll.install()

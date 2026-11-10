@@ -1,4 +1,4 @@
-/* The Insert menu's rows that take a restart (vk_menu.cpp: GPU device, Output resolution, Handheld profile, Ultrawide,
+/* The Insert menu's rows that take a restart (vk_menu.cpp: GPU device, Output resolution, Profile, Ultrawide,
    Robust buffers), as plain code: which of them differ from what the game started with, whether closing the menu asks to
    restart, and the rows' names as the menu lists them. No Vulkan, no menu: tests/test_menu_restart.cpp checks it. */
 #pragma once

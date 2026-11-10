@@ -1,7 +1,7 @@
 # Every game-free check, on every pull request to main and every push to it: tests/run_all.py runs each
 # tests/test_*.py and nx2/test_*.py (all of them, even after a failure), the C++ unit tests under gpu/vk/tests and a
-# byte-compile of every tracked Python file, and writes a table of them to the run's summary. Its skip list says which
-# checks need a GPU, the game or MSVC, and why. No game data is involved.
+# byte-compile of every tracked Python file, and writes a table of them to the run's summary. A check that needs a GPU,
+# the game or MSVC says so, and why, in its own file (RUN_ALL_SKIP). No game data is involved.
 name: Game-free source regressions
 
 on:

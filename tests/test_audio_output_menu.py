@@ -13,6 +13,8 @@ import re
 import subprocess
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "g++"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = r"""
@@ -39,7 +41,7 @@ static int device_channels, device_asked;
 static int au_device_channels(void) { device_asked++; return device_channels; }
 HOST
 struct Row { int tab; const char* name; int* value; };
-struct { int output_res, resolution, fps_cap, upscale, dlss, audio_output; } opts;
+struct { int output_res, resolution, fps_cap, upscale, dlss, handheld, audio_output; } opts;
 MENU
 int main(int argc, char **argv) {
     assert(argc == 7);
@@ -103,7 +105,7 @@ def main():
     assert row, "the Insert menu has no Audio output row"
     tab, name, lo, hi, step, text, hint, restart, exempt = row.groups()
     assert (tab, lo, hi, step, text, hint, restart, exempt) == \
-        ("GAMEPLAY", "0", "2", "1", "tx_audio_output", "hn_audio_output", "true", "true"), row.groups()
+        ("AUDIO", "0", "2", "1", "tx_audio_output", "hn_audio_output", "true", "true"), row.groups()
     host = between(audio, "/* (hookshot) The Insert menu's Audio output", "/* The device's format,")
     hints = re.search(r'MENU_HINTS\(hn_audio_output,.*?\)\n(?=\S)', menu, re.S)
     assert hints, "no MENU_HINTS(hn_audio_output, ...)"

@@ -28,6 +28,8 @@ import subprocess
 import sys
 import tempfile
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("later_makes", "three", "scratch", "scratch2", "in_order", "serial", "close_race", "after_submit", "init_begin_fail",
          "init_end_fail", "alloc_fail")

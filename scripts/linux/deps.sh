@@ -94,13 +94,13 @@ if ! done_for llvm "$LLVM_VER"; then
 fi
 
 # ---- Python and the tools' modules ----
-PY_MARK="$PY_VER-$PY_TAG-$(sha256sum nx2/prompt_requirements.txt | cut -c1-12)"   # (a new pin installs again)
+PY_MARK="$PY_VER-$PY_TAG-$(sha256sum requirements.txt nx2/prompt_requirements.txt | sha256sum | cut -c1-12)"   # (a new pin installs again)
 if ! done_for python "$PY_MARK"; then
     fetch "https://github.com/astral-sh/python-build-standalone/releases/download/$PY_TAG/cpython-$PY_VER+$PY_TAG-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" python.tar.gz "$PY_SHA256"
     rm -rf "$DEPS/python"
     tar -xzf "$DL/python.tar.gz" -C "$DEPS"
     "$DEPS/python/bin/python3" -m pip install --no-cache-dir --only-binary :all: --disable-pip-version-check -q \
-        "lz4==4.4.5" "numpy==2.5.4" "capstone==5.0.9" "unicorn==2.1.4" "zstandard==0.25.0" -r nx2/prompt_requirements.txt
+        -r requirements.txt
     rm -rf "$DEPS/python/lib/python3.12/test" "$DEPS/python/lib/python3.12/idlelib" "$DEPS/python/lib/python3.12/ensurepip"
     find "$DEPS/python" -name __pycache__ -prune -exec rm -rf {} +
     mark python "$PY_MARK"
