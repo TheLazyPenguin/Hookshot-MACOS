@@ -903,7 +903,7 @@ def main():
     build_vk = a.standalone and not a.only and not vk_prebuilt and vk_headers and spirv_headers and vma_headers
     if a.standalone and not a.only and vk_prebuilt:
         print("the Vulkan back end: %s, as built" % vk_prebuilt)
-    elif a.standalone and not a.only and not build_vk:
+    elif a.standalone and not a.only and not build_vk and not a.dry_run:
         # (was silent: the exe linked, RX_BACKEND=vulkan then fell through to WebGPU / a stub, black window)
         missing = [n for n, p in (("Vulkan", vk_headers), ("SPIR-V", spirv_headers), ("VMA", vma_headers)) if not p]
         print("no headers for %s (missing %s). Set RX_CPM to a CPM cache, or HOOKSHOT_VULKAN_HEADERS / "
