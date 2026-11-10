@@ -558,6 +558,8 @@ int start(void* hwnd) {
             }
         } else {
             logf("metal: started in headless/offscreen mode on %s", device_desc.c_str());
+            size_t warmed = MetalPipelineCache::instance().prewarm_cache_from_disk();
+            logf("metal: pre-warmed %zu cached shader pipelines from disk", warmed);
         }
         return 1;
     }

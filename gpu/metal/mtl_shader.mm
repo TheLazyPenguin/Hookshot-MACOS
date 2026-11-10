@@ -2,6 +2,8 @@
 #include "mtl_shader.h"
 
 #include <cstdio>
+#include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -216,6 +218,38 @@ id<MTLRenderPipelineState> MetalPipelineCache::get_or_create_render(
         render_cache_[key] = pso;
         return pso;
     }
+}
+
+size_t MetalPipelineCache::prewarm_cache_from_disk() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!device_ || cache_dir_.empty()) return 0;
+    size_t count = 0;
+    DIR* dir = opendir(cache_dir_.c_str());
+    if (!dir) return 0;
+    struct dirent* ent = nullptr;
+    while ((ent = readdir(dir)) != nullptr) {
+        const char* name = ent->d_name;
+        size_t len = strlen(name);
+        if (len > 4 && strcmp(name + len - 4, ".msl") == 0) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/%s", cache_dir_.c_str(), name);
+            std::ifstream in(path);
+            if (in.is_open()) {
+                std::stringstream ss;
+                ss << in.rdbuf();
+                std::string msl = ss.str();
+                uint64_t hash = 0;
+                try {
+                    hash = std::stoull(name, nullptr, 16);
+                } catch (...) {}
+                if (compile_msl(msl, hash)) {
+                    count++;
+                }
+            }
+        }
+    }
+    closedir(dir);
+    return count;
 }
 
 #endif // __APPLE__

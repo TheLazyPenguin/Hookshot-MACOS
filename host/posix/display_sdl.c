@@ -204,6 +204,7 @@ int hos_display_init(void) {
         return -1;
     }
     hos_sdl_identity("Hookshot", HOS_APP_ID);
+#ifndef __APPLE__
     hos_sdl_hint("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "0");
     hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     /* (bundled SDL tries x11 before wayland. NVIDIA's X11 surface has no mailbox, and an immediate
@@ -219,6 +220,12 @@ int hos_display_init(void) {
        (#992). libdecor takes the compositor's decorations itself where they are offered; with no libdecor SDL keeps
        its own. SDL3 waits on the window's state and is left alone; SDL_VIDEO_WAYLAND_PREFER_LIBDECOR still wins) */
     if (hos_sdl_load() == 2) hos_sdl_hint("SDL_VIDEO_WAYLAND_PREFER_LIBDECOR", "1");
+#else
+    hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+    hos_sdl_hint("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
+    hos_sdl_hint("SDL_JOYSTICK_HIDAPI_PS5", "1");
+    hos_sdl_hint("SDL_JOYSTICK_MFI", "1");
+#endif
     if (!hos_sdl_init(HOS_SDL_VIDEO | HOS_SDL_EVENTS)) {
         hos_log("display: SDL_Init: %s: no window", hos_sdl_error());
         fprintf(stderr, "display: SDL_Init: %s: no window\n", hos_sdl_error());

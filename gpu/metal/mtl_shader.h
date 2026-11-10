@@ -71,6 +71,9 @@ public:
         const uint32_t* fs_words, size_t fs_count, uint64_t fs_hash,
         MTLPixelFormat color_format, MTLPixelFormat depth_format);
 
+    // Pre-warm and compile all cached MSL shaders from disk
+    size_t prewarm_cache_from_disk();
+
 private:
     id<MTLDevice> device_ = nil;
     std::string cache_dir_;
