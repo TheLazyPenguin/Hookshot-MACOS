@@ -14,8 +14,9 @@ static struct {
     void *InitSubSystem, *SetHint, *GetError;
     /* window */
     void *CreateWindow, *SetWindowPosition, *SetWindowFullscreen, *SetRelativeMouseMode, *GetPrimaryDisplay,
-        *GetDesktopDisplayMode, *Vulkan_CreateSurface, *PixelSize, *GetKeyboardState, *GetMouseState, *WaitEventTimeout,
-        *PollEvent, *GetWindowSize, *LoadPNG, *SetWindowIcon, *DestroySurface, *GetWindowDisplay, *GetCurrentDisplayMode;
+        *GetDesktopDisplayMode, *Vulkan_CreateSurface, *Metal_CreateView, *Metal_GetLayer, *PixelSize, *GetKeyboardState,
+        *GetMouseState, *WaitEventTimeout, *PollEvent, *GetWindowSize, *LoadPNG, *SetWindowIcon, *DestroySurface,
+        *GetWindowDisplay, *GetCurrentDisplayMode;
     /* sound */
     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
     /* controllers */
@@ -50,6 +51,8 @@ static int get_all(HMODULE m, int three) {
     GET2(SetRelativeMouseMode, "SDL_SetWindowRelativeMouseMode", "SDL_SetRelativeMouseMode");
     GET(GetDesktopDisplayMode, "SDL_GetDesktopDisplayMode");
     GET(Vulkan_CreateSurface, "SDL_Vulkan_CreateSurface");
+    *(FARPROC *)&f.Metal_CreateView = GetProcAddress(m, "SDL_Metal_CreateView");
+    *(FARPROC *)&f.Metal_GetLayer = GetProcAddress(m, "SDL_Metal_GetLayer");
     GET2(PixelSize, "SDL_GetWindowSizeInPixels", "SDL_Vulkan_GetDrawableSize");
     GET(GetKeyboardState, "SDL_GetKeyboardState");
     GET(GetMouseState, "SDL_GetMouseState");
@@ -144,13 +147,18 @@ void hos_sdl_identity(const char *name, const char *app_id) {
 const char *hos_sdl_error(void) { return version ? CALL(const char *(*)(void), GetError)() : "no SDL"; }
 
 /* ---- the window ---- */
-enum { WIN_SHOWN2 = 0x4, WIN_RESIZABLE = 0x20, WIN_HIGH_DENSITY = 0x2000, WIN_VULKAN = 0x10000000, CENTRED = 0x2FFF0000 };
+enum { WIN_SHOWN2 = 0x4, WIN_RESIZABLE = 0x20, WIN_HIGH_DENSITY = 0x2000, WIN_VULKAN = 0x10000000, WIN_METAL = 0x20000000, CENTRED = 0x2FFF0000 };
 void *hos_sdl_window(const char *title, int width, int height) {
+#ifdef __APPLE__
+    const uint32_t gpu_flag = WIN_VULKAN | WIN_METAL;
+#else
+    const uint32_t gpu_flag = WIN_VULKAN;
+#endif
     if (version == 2)
         return CALL(void *(*)(const char *, int, int, int, int, uint32_t), CreateWindow)(
-            title, CENTRED, CENTRED, width, height, WIN_SHOWN2 | WIN_RESIZABLE | WIN_HIGH_DENSITY | WIN_VULKAN);
+            title, CENTRED, CENTRED, width, height, WIN_SHOWN2 | WIN_RESIZABLE | WIN_HIGH_DENSITY | gpu_flag);
     void *w = CALL(void *(*)(const char *, int, int, uint64_t), CreateWindow)(title, width, height,
-                                                                              WIN_RESIZABLE | WIN_HIGH_DENSITY | WIN_VULKAN);
+                                                                              WIN_RESIZABLE | WIN_HIGH_DENSITY | gpu_flag);
     if (w) CALL(_Bool (*)(void *, int, int), SetWindowPosition)(w, CENTRED, CENTRED);
     return w;
 }
@@ -194,8 +202,19 @@ int hos_sdl_refresh_mhz(void *window) {
     return hz > 1 && hz < 1000 ? (int)(hz * 1000 + 0.5f) : 0;
 }
 int hos_sdl_vulkan_surface(void *window, void *instance, void *surface_out) {
+    if (!instance && f.Metal_CreateView && f.Metal_GetLayer) {
+        void *view = CALL(void *(*)(void *), Metal_CreateView)(window);
+        void *layer = view ? CALL(void *(*)(void *), Metal_GetLayer)(view) : NULL;
+        if (surface_out) *(void **)surface_out = layer;
+        return layer != NULL;
+    }
     return version == 3 ? CALL(_Bool (*)(void *, void *, const void *, void *), Vulkan_CreateSurface)(window, instance, NULL, surface_out)
                         : CALL(int (*)(void *, void *, void *), Vulkan_CreateSurface)(window, instance, surface_out) != 0;
+}
+void *hos_sdl_metal_layer(void *window) {
+    void *layer = NULL;
+    hos_sdl_vulkan_surface(window, NULL, &layer);
+    return layer;
 }
 void hos_sdl_pixel_size(void *window, int *width, int *height) {
     if (version == 3) CALL(_Bool (*)(void *, int *, int *), PixelSize)(window, width, height);

@@ -67,6 +67,7 @@ POSIX = os.path.join(kit.HERE, "..", "host", "posix")
 SYSROOT = os.environ.get("HOOKSHOT_SYSROOT", "")
 EXE = "hookshot" if POSIX_BUILD else "hookshot.exe"
 VK_LIB = "hookshot_vk.dylib" if DARWIN else ("hookshot_vk.so" if LINUX else "hookshot_vk.dll")
+MTL_LIB = "hookshot_metal.dylib"
 
 
 def check_vk_symbols(so):
@@ -928,9 +929,22 @@ def main():
             for f in ("win32_posix.c",):
                 vk_jobs.append((cc, os.path.join(POSIX, f), os.path.join(obj_dir, "vk_posix_" + f[:-2] + ".o"), cflags, pdeps))
         jobs += vk_jobs
+    # the native Metal back end on macOS (RX_BACKEND=metal -> hookshot_metal.dylib), built alongside hookshot_vk.dylib
+    mtl_jobs = []
+    if DARWIN and a.standalone and not a.only:
+        cxx = toolchain.need(toolchain.find("clang++"))
+        mtl_src = os.path.join(GPU, "metal", "mtl_main.mm")
+        if os.path.isfile(mtl_src):
+            mflags = target() + CPU + [
+                "-ObjC++", "-fobjc-arc", "-fPIC", "-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything",
+                "-DMKWVK_BUILDING", "-I" + os.path.join(GPU, "vk")
+            ]
+            mdeps = open(os.path.join(GPU, "vk", "vk_api.h"), "rb").read()
+            mtl_jobs.append((cxx, mtl_src, os.path.join(obj_dir, "mtl_main.o"), mflags, mdeps))
+            jobs += mtl_jobs
     vk_only = bool(os.environ.get("RX_VK_ONLY"))   # (the renderer alone, the game's objects as they are)
     if vk_only:
-        jobs = list(vk_jobs)
+        jobs = list(vk_jobs) + list(mtl_jobs)
     if a.dry_run:   # (the compile starts here: what it would read, said and checked, and nothing compiled)
         missing = sorted({j[1] for j in jobs if not os.path.isfile(j[1])} |
                          ({vk_prebuilt} if vk_prebuilt and not os.path.isfile(vk_prebuilt) else set()))
@@ -994,7 +1008,7 @@ def main():
     print("compiled in %.0fs, %d failed" % (time.time() - t0, still), flush=True)
     if still:
         return 1
-    vk_objs = {j[2] for j in vk_jobs}
+    vk_objs = {j[2] for j in vk_jobs} | {j[2] for j in mtl_jobs}
     objs = [j[2] for j in jobs if j[2] not in vk_objs]
     rsp = os.path.join(out, "objs.rsp")
     open(rsp, "w", encoding="utf-8").write("\n".join('"%s"' % o.replace("\\", "/") for o in objs))
@@ -1111,6 +1125,25 @@ def main():
         if LINUX and not check_vk_symbols(vdll):
             return 1
         print("linked %s: %d MB (%.0fs)" % (vdll, os.path.getsize(vdll) >> 20, time.time() - t))
+    if mtl_jobs:   # (hookshot_metal.dylib beside the exe: loaded by host/rx_backend.c with RX_BACKEND=metal)
+        mdll = os.path.join(out, MTL_LIB)
+        mrsp = os.path.join(out, "mtl_objs.rsp")
+        open(mrsp, "w", encoding="utf-8").write("\n".join('"%s"' % j[2].replace("\\", "/") for j in mtl_jobs))
+        t = time.time()
+        mlink = [toolchain.need(toolchain.find("clang++"))] + target() + [
+            "-dynamiclib", "-o", mdll, "-Wl,-dead_strip",
+            "-Wl,-install_name,@rpath/" + MTL_LIB,
+            "@" + mrsp,
+            "-framework", "Metal", "-framework", "QuartzCore", "-framework", "Foundation", "-framework", "Cocoa",
+            "-ldl", "-lpthread", "-lm"
+        ]
+        r = subprocess.run(mlink, capture_output=True, text=True)
+        if r.returncode:
+            undefined = sorted({l.strip() for l in (r.stdout + r.stderr).splitlines() if "undefined symbol" in l})
+            print("%s link FAILED, %d undefined symbols" % (MTL_LIB, len(undefined)))
+            print("\n".join(undefined[:60]) if undefined else (r.stdout + r.stderr)[-3000:])
+            return 1
+        print("linked %s: %d KB (%.0fs)" % (mdll, os.path.getsize(mdll) >> 10, time.time() - t))
     if a.dll and not a.only:
         dll = os.path.join(out, "hookshot_game.dll")   # (+ hookshot_game.map: crash offsets -> f_<guest address>)
         t = time.time()

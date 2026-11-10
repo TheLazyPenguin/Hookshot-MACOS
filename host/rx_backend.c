@@ -256,16 +256,17 @@ static const MkwVkRenderer *load_vulkan(const char *dll) {
 int rx_start(void *hwnd) {
     const char *b = getenv("RX_BACKEND");
     const int eden = b && !_stricmp(b, "eden");
-    if (!b || !_stricmp(b, "vulkan") || eden) {   /* (hookshot: Vulkan unless told otherwise; a started game has no RX_BACKEND) */
-        const char *dll = eden ? "mkw_eden.dll" : "hookshot_vk.dll";
+    const int metal = b && !_stricmp(b, "metal");
+    if (!b || !_stricmp(b, "vulkan") || eden || metal) {   /* (hookshot: Vulkan unless told otherwise; a started game has no RX_BACKEND) */
+        const char *dll = eden ? "mkw_eden.dll" : (metal ? "hookshot_metal.dll" : "hookshot_vk.dll");
         const MkwVkRenderer *r = load_vulkan(dll);
         if (r && r->start(hwnd)) {
             vk = r;
-            hos_log("rx: renderer: %s (%s)", eden ? "Eden's" : "Vulkan", dll);
+            hos_log("rx: renderer: %s (%s)", eden ? "Eden's" : (metal ? "Metal" : "Vulkan"), dll);
             flush_early();
             return 1;
         }
-        if (r) hos_log("rx: the Vulkan back end could not start on the window: WebGPU");
+        if (r) hos_log("rx: the %s back end could not start on the window: WebGPU", metal ? "Metal" : "Vulkan");
     }
     const int ok = wgr_start(hwnd);
     flush_early();
@@ -274,7 +275,9 @@ int rx_start(void *hwnd) {
 /* (hookshot) hookshot --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
    every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
 int rx_prepare_shaders(void) {
-    const MkwVkRenderer *r = load_vulkan("hookshot_vk.dll");
+    const char *b = getenv("RX_BACKEND");
+    const int metal = b && !_stricmp(b, "metal");
+    const MkwVkRenderer *r = load_vulkan(metal ? "hookshot_metal.dll" : "hookshot_vk.dll");
     return r && r->start(NULL);
 }
 /* (hookshot) the window is being closed: a back end still preparing its shaders stops and keeps what it made first (a few

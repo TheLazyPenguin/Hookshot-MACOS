@@ -52,7 +52,7 @@ CROSS = WINDOWS and os.name != "nt"
 # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
 # library" three times and no controller worked: Discord #bug-reporting, 11-08)
 if DARWIN:
-    BESIDE = ["hookshot", "hookshot_vk.dylib"]
+    BESIDE = ["hookshot", "hookshot_vk.dylib", "hookshot_metal.dylib"]
 elif LINUX:
     BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"]
 else:
