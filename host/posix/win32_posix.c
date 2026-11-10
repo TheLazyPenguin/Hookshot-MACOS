@@ -248,7 +248,14 @@ static void thread_finish(DWORD code) {
 static void *thread_entry(void *p) {
     HThread *t = (HThread *)p;
     self_thread = t;
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    t->tid = (pid_t)tid;
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#else
     t->tid = (pid_t)syscall(SYS_gettid);
+#endif
     thread_finish(t->fn(t->arg));
     return NULL;
 }
@@ -302,8 +309,18 @@ BOOL SetThreadPriority(HANDLE h, int p) {
     HThread *t = thread_of(h);
     if (!t) { last_error = ERROR_INVALID_HANDLE; return FALSE; }
     t->priority = p;
+#if defined(__APPLE__)
+    qos_class_t qos = QOS_CLASS_DEFAULT;
+    if (p >= THREAD_PRIORITY_HIGHEST) qos = QOS_CLASS_USER_INTERACTIVE;
+    else if (p >= THREAD_PRIORITY_ABOVE_NORMAL) qos = QOS_CLASS_USER_INITIATED;
+    else if (p <= THREAD_PRIORITY_IDLE) qos = QOS_CLASS_BACKGROUND;
+    else if (p <= THREAD_PRIORITY_LOWEST) qos = QOS_CLASS_UTILITY;
+    else qos = QOS_CLASS_DEFAULT;
+    pthread_set_qos_class_self_np(qos, 0);
+#else
     const int nice = p <= THREAD_PRIORITY_IDLE ? 19 : p <= THREAD_PRIORITY_LOWEST ? 10 : p == THREAD_PRIORITY_BELOW_NORMAL ? 5 : 0;
     if (nice && t->tid) setpriority(PRIO_PROCESS, (id_t)t->tid, nice);
+#endif
     return TRUE;
 }
 int GetThreadPriority(HANDLE h) {

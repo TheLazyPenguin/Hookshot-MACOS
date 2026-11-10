@@ -99,7 +99,7 @@ void hos_thread_affinity(HosThread *t, int ideal, uint64_t mask) {
 }
 uint64_t hos_thread_mask(HosThread *t) { return t->core_mask; }
 void hos_thread_boost(int level) {
-#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#if (defined(_WIN32) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)
     static int off = -1;
     if (off < 0) off = getenv("HOS_NO_PRIORITIES") != NULL;
     if (!off) SetThreadPriority(GetCurrentThread(), level >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
@@ -463,6 +463,9 @@ Ctx *hos_boot_main_thread(uint64_t stack_size) {
     setup_guest(t);
     t->ctx.x[31] = (t->stack + stack_size) & ~15ULL;
     cur = t;
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     track(t);
     hos_vcore_back();   /* (virtual cores: before any guest code) */
     return &t->ctx;

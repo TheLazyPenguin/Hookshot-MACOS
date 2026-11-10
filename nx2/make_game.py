@@ -48,6 +48,7 @@ BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile
 STARTED = time.time()   # (the build's total time, kept in build_times.json and said as @@times)
 sys.path[:0] = [HERE, os.path.join(ROOT, "third_party", "a64-kit", "tools")]   # (python -I leaves the script folder off)
 import disk as _disk
+import toolchain as _toolchain
 DARWIN = getattr(_toolchain, "darwin", lambda: sys.platform == "darwin")()
 WINDOWS = _toolchain.windows()
 LINUX = not WINDOWS and not DARWIN
@@ -1753,6 +1754,12 @@ def main(a=None):
         not_prepared(skipped)
     else:
         prepare_shaders([os.path.join(game_dir, BESIDE[0]), "--prepare-shaders"], out)
+    if DARWIN:
+        try:
+            import make_app
+            make_app.make_app(out)
+        except Exception as e:
+            print("note: could not create Hookshot.app bundle: %s" % e, flush=True)
     say("done", out)
 
 

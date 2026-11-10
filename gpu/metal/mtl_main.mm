@@ -488,6 +488,10 @@ int start(void* hwnd) {
                 mtl_layer.device = mtl_device;
                 mtl_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                 mtl_layer.framebufferOnly = NO;
+                mtl_layer.maximumDrawableCount = 3;
+                if (@available(macOS 10.13, *)) {
+                    mtl_layer.displaySyncEnabled = YES;
+                }
                 int w = 1280, h = 720;
                 if (main_win->drawable_size) main_win->drawable_size(main_win->window, &w, &h);
                 if (w > 0 && h > 0) mtl_layer.drawableSize = CGSizeMake(w, h);

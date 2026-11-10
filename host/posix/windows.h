@@ -13,6 +13,9 @@
 #endif
 #include <errno.h>
 #include <pthread.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
 #include <sched.h>
 #include <stddef.h>
 #include <stdint.h>
