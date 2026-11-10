@@ -186,9 +186,94 @@ void write_counter_report(uint64_t type, uint64_t addr) {
     }
 }
 
+id<MTLBuffer> find_buffer(uint64_t gpu_addr, uint64_t* out_offset) {
+    std::lock_guard<std::mutex> lk(pool_mu);
+    for (const auto& p : pools) {
+        if (gpu_addr >= p.guest_lo && gpu_addr < p.guest_hi) {
+            if (out_offset) *out_offset = gpu_addr - p.guest_lo;
+            return p.buffer;
+        }
+    }
+    return nil;
+}
+
+struct MtlBufBind {
+    id<MTLBuffer> buf = nil;
+    uint64_t offset = 0;
+    uint64_t size = 0;
+};
+
 void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
     if (!cur) return;
     const nvn_p_set_rt* current_rt = nullptr;
+    id<MTLRenderCommandEncoder> render_enc = nil;
+    MTLViewport current_vp{0, 0, 1280, 720, 0.0, 1.0};
+    MTLScissorRect current_sc{0, 0, 1280, 720};
+    bool has_vp = false;
+    bool has_sc = false;
+
+    MtlBufBind vbufs[16]{};
+    MtlBufBind ubos[6][16]{};
+
+    auto end_render_pass = [&]() {
+        if (render_enc) {
+            [render_enc endEncoding];
+            render_enc = nil;
+        }
+    };
+
+    auto ensure_render_pass = [&]() -> bool {
+        if (render_enc) return true;
+        if (!current_rt || !cmd_buf) return false;
+
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        bool has_target = false;
+        for (int i = 0; i < current_rt->n && i < 8; i++) {
+            if (current_rt->color[i]) {
+                id<MTLTexture> ctex = ensure_texture(current_rt->color[i]);
+                if (ctex) {
+                    rpd.colorAttachments[i].texture = ctex;
+                    rpd.colorAttachments[i].loadAction = MTLLoadActionLoad;
+                    rpd.colorAttachments[i].storeAction = MTLStoreActionStore;
+                    has_target = true;
+                }
+            }
+        }
+        if (current_rt->depth) {
+            id<MTLTexture> dtex = ensure_texture(current_rt->depth);
+            if (dtex) {
+                rpd.depthAttachment.texture = dtex;
+                rpd.depthAttachment.loadAction = MTLLoadActionLoad;
+                rpd.depthAttachment.storeAction = MTLStoreActionStore;
+                has_target = true;
+            }
+        }
+        if (!has_target) return false;
+
+        render_enc = [cmd_buf renderCommandEncoderWithDescriptor:rpd];
+        if (!render_enc) return false;
+
+        if (has_vp) [render_enc setViewport:current_vp];
+        if (has_sc) [render_enc setScissorRect:current_sc];
+
+        // Bind active vertex buffers
+        for (int i = 0; i < 16; i++) {
+            if (vbufs[i].buf) {
+                [render_enc setVertexBuffer:vbufs[i].buf offset:vbufs[i].offset atIndex:i];
+            }
+        }
+        // Bind active uniform buffers (VS: slots 16-31, FS: slots 0-15)
+        for (int i = 0; i < 16; i++) {
+            if (ubos[0][i].buf) {
+                [render_enc setVertexBuffer:ubos[0][i].buf offset:ubos[0][i].offset atIndex:16 + i];
+            }
+            if (ubos[1][i].buf) {
+                [render_enc setFragmentBuffer:ubos[1][i].buf offset:ubos[1][i].offset atIndex:i];
+            }
+        }
+        return true;
+    };
+
     while (cur) {
         const auto* hdr = reinterpret_cast<const nvn_op_hdr*>(cur);
         if (hdr->op == NOP_END || hdr->size == 0) break;
@@ -201,6 +286,7 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
         const uint8_t* payload = cur + sizeof(nvn_op_hdr);
         switch (hdr->op) {
         case NOP_CALL: {
+            end_render_pass();
             uint64_t sub = 0;
             std::memcpy(&sub, payload, sizeof(uint64_t));
             replay_recording(reinterpret_cast<const uint8_t*>(sub), cmd_buf);
@@ -213,10 +299,8 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
             }
             break;
         }
-        case NOP_WAIT_EVENT: {
-            // Event values in unified memory are updated in order
+        case NOP_WAIT_EVENT:
             break;
-        }
         case NOP_REPORT_COUNTER: {
             const auto* c = reinterpret_cast<const nvn_p_counter*>(payload);
             write_counter_report(c->type, c->addr);
@@ -262,6 +346,7 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
             break;
         }
         case NOP_SET_RT: {
+            end_render_pass();
             current_rt = reinterpret_cast<const nvn_p_set_rt*>(payload);
             for (int i = 0; i < current_rt->n && i < 8; i++) {
                 if (current_rt->color[i]) ensure_texture(current_rt->color[i]);
@@ -269,9 +354,55 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
             if (current_rt->depth) ensure_texture(current_rt->depth);
             break;
         }
+        case NOP_VIEWPORTS: {
+            const auto* vp = reinterpret_cast<const nvn_p_viewports*>(payload);
+            if (vp->n > 0) {
+                current_vp = MTLViewport{vp->v[0][0], vp->v[0][1], vp->v[0][2], vp->v[0][3], 0.0, 1.0};
+                has_vp = true;
+                if (render_enc) [render_enc setViewport:current_vp];
+            }
+            break;
+        }
+        case NOP_SCISSOR: {
+            const auto* sc = reinterpret_cast<const nvn_p_scissor*>(payload);
+            NSUInteger sx = sc->x >= 0 ? (NSUInteger)sc->x : 0;
+            NSUInteger sy = sc->y >= 0 ? (NSUInteger)sc->y : 0;
+            NSUInteger sw = sc->w > 0 ? (NSUInteger)sc->w : 1;
+            NSUInteger sh = sc->h > 0 ? (NSUInteger)sc->h : 1;
+            current_sc = MTLScissorRect{sx, sy, sw, sh};
+            has_sc = true;
+            if (render_enc) [render_enc setScissorRect:current_sc];
+            break;
+        }
+        case NOP_BIND_VBUF: {
+            const auto* vb = reinterpret_cast<const nvn_p_bind_vbuf*>(payload);
+            for (int i = 0; i < vb->n && (vb->first + i) < 16; i++) {
+                uint64_t off = 0;
+                id<MTLBuffer> b = find_buffer(vb->r[i].address, &off);
+                vbufs[vb->first + i] = {b, off, vb->r[i].size};
+                if (render_enc && b) {
+                    [render_enc setVertexBuffer:b offset:off atIndex:vb->first + i];
+                }
+            }
+            break;
+        }
+        case NOP_BIND_UBO: {
+            const auto* ub = reinterpret_cast<const nvn_p_bind_buf*>(payload);
+            if (ub->stage >= 0 && ub->stage < 6 && ub->index >= 0 && ub->index < 16) {
+                uint64_t off = 0;
+                id<MTLBuffer> b = find_buffer(ub->addr, &off);
+                ubos[ub->stage][ub->index] = {b, off, ub->size};
+                if (render_enc && b) {
+                    if (ub->stage == 0) [render_enc setVertexBuffer:b offset:off atIndex:16 + ub->index];
+                    else if (ub->stage == 1) [render_enc setFragmentBuffer:b offset:off atIndex:ub->index];
+                }
+            }
+            break;
+        }
         case NOP_CLEAR_COLOR: {
             const auto* cc = reinterpret_cast<const nvn_p_clear_color*>(payload);
             if (current_rt && cc->index >= 0 && cc->index < current_rt->n && current_rt->color[cc->index]) {
+                end_render_pass();
                 id<MTLTexture> tex = ensure_texture(current_rt->color[cc->index]);
                 if (tex && cmd_buf) {
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -285,11 +416,56 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
             }
             break;
         }
-        case NOP_DRAW:
-        case NOP_DRAW_IDX:
+        case NOP_CLEAR_DS: {
+            const auto* cds = reinterpret_cast<const nvn_p_clear_ds*>(payload);
+            if (current_rt && current_rt->depth) {
+                end_render_pass();
+                id<MTLTexture> dtex = ensure_texture(current_rt->depth);
+                if (dtex && cmd_buf) {
+                    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rpd.depthAttachment.texture = dtex;
+                    rpd.depthAttachment.loadAction = MTLLoadActionClear;
+                    rpd.depthAttachment.storeAction = MTLStoreActionStore;
+                    rpd.depthAttachment.clearDepth = cds->depth;
+                    id<MTLRenderCommandEncoder> enc = [cmd_buf renderCommandEncoderWithDescriptor:rpd];
+                    [enc endEncoding];
+                }
+            }
+            break;
+        }
+        case NOP_DRAW: {
+            const auto* d = reinterpret_cast<const nvn_p_draw*>(payload);
+            stat_draws.fetch_add(1, std::memory_order_relaxed);
+            if (ensure_render_pass()) {
+                MTLPrimitiveType prim = (d->prim == 4) ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypeTriangleStrip;
+                [render_enc drawPrimitives:prim vertexStart:d->first vertexCount:d->count instanceCount:std::max(1, (int)d->instances)];
+            }
+            break;
+        }
+        case NOP_DRAW_IDX: {
+            const auto* di = reinterpret_cast<const nvn_p_draw_idx*>(payload);
+            stat_draws.fetch_add(1, std::memory_order_relaxed);
+            uint64_t ioff = 0;
+            id<MTLBuffer> ib = find_buffer(di->ibuf, &ioff);
+            if (ib && ensure_render_pass()) {
+                MTLPrimitiveType prim = (di->prim == 4) ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypeTriangleStrip;
+                MTLIndexType itype = (di->itype == 1) ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+                [render_enc drawIndexedPrimitives:prim indexCount:di->count indexType:itype indexBuffer:ib indexBufferOffset:ioff instanceCount:std::max(1, (int)di->instances)];
+            }
+            break;
+        }
+        case NOP_DISPATCH: {
+            const auto* disp = reinterpret_cast<const nvn_p_dispatch*>(payload);
+            stat_draws.fetch_add(1, std::memory_order_relaxed);
+            end_render_pass();
+            if (disp->x > 0 && disp->y > 0 && disp->z > 0 && cmd_buf) {
+                id<MTLComputeCommandEncoder> cenc = [cmd_buf computeCommandEncoder];
+                if (cenc) [cenc endEncoding];
+            }
+            break;
+        }
         case NOP_DRAW_INDIRECT:
         case NOP_DRAW_MESH:
-        case NOP_DISPATCH:
         case NOP_DISPATCH_INDIRECT:
             stat_draws.fetch_add(1, std::memory_order_relaxed);
             break;
@@ -298,6 +474,7 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
         }
         cur += hdr->size;
     }
+    end_render_pass();
 }
 
 int start(void* hwnd) {
