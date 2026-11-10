@@ -82,6 +82,7 @@ struct TexEntry {
 std::mutex tex_mu;
 std::unordered_map<uint64_t, TexEntry> textures_by_gpu;
 std::unordered_map<int, uint64_t> registered_textures;
+std::unordered_map<int, id<MTLSamplerState>> registered_samplers;
 
 std::mutex opt_mu;
 std::unordered_map<int, int> options_map;
@@ -624,7 +625,21 @@ void nvn_register_texture(int id, const nvn_tex* t, const nvn_view*) {
     }
 }
 
-void nvn_register_sampler(int, const nvn_samp_par*) {}
+void nvn_register_sampler(int id, const nvn_samp_par* p) {
+    if (!p) return;
+    @autoreleasepool {
+        MTLSamplerDescriptor* desc = [[MTLSamplerDescriptor alloc] init];
+        desc.minFilter = (p->minf == 1) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        desc.magFilter = (p->magf == 1) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        desc.mipFilter = MTLSamplerMipFilterLinear;
+        desc.lodMinClamp = p->lod_min;
+        desc.lodMaxClamp = p->lod_max;
+        desc.maxAnisotropy = std::max(1, (int)p->aniso);
+        id<MTLSamplerState> sampler = [mtl_device newSamplerStateWithDescriptor:desc];
+        std::lock_guard<std::mutex> lk(tex_mu);
+        registered_samplers[id] = sampler;
+    }
+}
 void nvn_set_texture_pool_size(int) {}
 
 void nvn_texture_released(const nvn_tex* t) {
