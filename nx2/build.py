@@ -933,14 +933,25 @@ def main():
     mtl_jobs = []
     if DARWIN and a.standalone and not a.only:
         cxx = toolchain.need(toolchain.find("clang++"))
-        mtl_src = os.path.join(GPU, "metal", "mtl_main.mm")
-        if os.path.isfile(mtl_src):
+        mtl_dir = os.path.join(GPU, "metal")
+        spirv_cross_dir = os.path.normpath(os.path.join(kit.HERE, "..", "third_party", "spirv-cross"))
+        if os.path.isdir(mtl_dir) and os.path.isdir(spirv_cross_dir):
+            spv_deps = tree_headers(spirv_cross_dir)
+            spv_flags = target() + CPU + ["-fPIC", "-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything", "-I" + spirv_cross_dir]
+            for f in ("spirv_cross.cpp", "spirv_cross_parsed_ir.cpp", "spirv_parser.cpp", "spirv_cfg.cpp", "spirv_glsl.cpp", "spirv_msl.cpp"):
+                src = os.path.join(spirv_cross_dir, f)
+                if os.path.isfile(src):
+                    mtl_jobs.append((cxx, src, os.path.join(obj_dir, "spv_" + f[:-4] + ".o"), spv_flags, spv_deps))
+
+            mtl_deps = tree_headers(mtl_dir) + spv_deps + open(os.path.join(GPU, "vk", "vk_api.h"), "rb").read()
             mflags = target() + CPU + [
                 "-ObjC++", "-fobjc-arc", "-fPIC", "-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything",
-                "-DMKWVK_BUILDING", "-I" + os.path.join(GPU, "vk")
+                "-DMKWVK_BUILDING", "-I" + os.path.join(GPU, "vk"), "-I" + mtl_dir, "-I" + spirv_cross_dir
             ]
-            mdeps = open(os.path.join(GPU, "vk", "vk_api.h"), "rb").read()
-            mtl_jobs.append((cxx, mtl_src, os.path.join(obj_dir, "mtl_main.o"), mflags, mdeps))
+            for f in ("mtl_main.mm", "mtl_shader.mm"):
+                src = os.path.join(mtl_dir, f)
+                if os.path.isfile(src):
+                    mtl_jobs.append((cxx, src, os.path.join(obj_dir, f[:-3] + ".o"), mflags, mtl_deps))
             jobs += mtl_jobs
     vk_only = bool(os.environ.get("RX_VK_ONLY"))   # (the renderer alone, the game's objects as they are)
     if vk_only:

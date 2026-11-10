@@ -31,6 +31,7 @@
 
 #define MKWVK_BUILDING 1
 #include "../vk/vk_api.h"
+#include "mtl_shader.h"
 
 namespace mkwmtl {
 namespace {
@@ -552,6 +553,9 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
         device_desc = std::string([[mtl_device name] UTF8String]) + " (Metal, native)";
         logf("metal: initialized native Metal device: %s (unified memory: %s)",
              [[mtl_device name] UTF8String], mtl_device.hasUnifiedMemory ? "yes" : "no");
+
+        // Initialize shader and pipeline state cache
+        MetalPipelineCache::instance().init(mtl_device, "work/sa/cache/metal_shaders");
 
         table.version = MKWVK_API_VERSION;
         table.start = start;
