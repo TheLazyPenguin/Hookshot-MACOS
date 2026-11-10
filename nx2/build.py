@@ -451,8 +451,8 @@ FFMPEG_LIBS = ("avcodec", "swscale", "swresample", "avutil")
 
 
 def ffmpeg_linux():
-    """(linux) FFmpeg's compile and link flags: HOOKSHOT_FFMPEG=<prefix> with static libraries (the AppImage's, with
-    dav1d for OoT's AV1 movies), else the system's through pkg-config; None without either"""
+    """(posix) FFmpeg's compile and link flags: HOOKSHOT_FFMPEG=<prefix> with static libraries (the AppImage's, with
+    dav1d for OoT's AV1 movies), else the system's through pkg-config, or Homebrew on Darwin; None without either"""
     pre = os.environ.get("HOOKSHOT_FFMPEG")
     if pre and os.path.exists(os.path.join(pre, "lib", "libavcodec.a")):
         libs = [os.path.join(pre, "lib", "lib%s.a" % l) for l in FFMPEG_LIBS]
@@ -464,10 +464,17 @@ def ffmpeg_linux():
         libs = subprocess.run(["pkg-config", "--libs"] + names, capture_output=True, text=True, check=True).stdout.split()
         return cflags, libs
     except (OSError, subprocess.CalledProcessError):
-        return None
+        pass
+    if DARWIN:
+        for brew_prefix in ("/opt/homebrew", "/usr/local"):
+            if os.path.exists(os.path.join(brew_prefix, "include", "libavcodec", "avcodec.h")):
+                cflags = ["-I" + os.path.join(brew_prefix, "include")]
+                libs = ["-L" + os.path.join(brew_prefix, "lib")] + ["-l" + l for l in FFMPEG_LIBS]
+                return cflags, libs
+    return None
 
 
-if LINUX:
+if LINUX or DARWIN:
     FFMPEG_LX = ffmpeg_linux()
     FFMPEG = None
 
@@ -478,7 +485,7 @@ def ffmpeg_version_key():
     incs = []
     if FFMPEG:
         incs.append(os.path.join(FFMPEG, "include"))
-    if LINUX and FFMPEG_LX:
+    if (LINUX or DARWIN) and FFMPEG_LX:
         incs += [f[2:] for f in FFMPEG_LX[0] if f.startswith("-I")]
     incs.append("/usr/include")
     for inc in incs:
