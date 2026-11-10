@@ -13,6 +13,10 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Foundation/Foundation.h>
+#if __has_include(<MetalFX/MetalFX.h>)
+#import <MetalFX/MetalFX.h>
+#define HAVE_METALFX 1
+#endif
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -188,9 +192,16 @@ void write_counter_report(uint64_t type, uint64_t addr) {
 }
 
 id<MTLBuffer> find_buffer(uint64_t gpu_addr, uint64_t* out_offset) {
+    if (!gpu_addr) return nil;
+    thread_local PoolBuffer last_pool{};
+    if (gpu_addr >= last_pool.guest_lo && gpu_addr < last_pool.guest_hi && last_pool.buffer != nil) {
+        if (out_offset) *out_offset = gpu_addr - last_pool.guest_lo;
+        return last_pool.buffer;
+    }
     std::lock_guard<std::mutex> lk(pool_mu);
     for (const auto& p : pools) {
         if (gpu_addr >= p.guest_lo && gpu_addr < p.guest_hi) {
+            last_pool = p;
             if (out_offset) *out_offset = gpu_addr - p.guest_lo;
             return p.buffer;
         }
@@ -216,16 +227,66 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
     MtlBufBind vbufs[16]{};
     MtlBufBind ubos[6][16]{};
 
+    bool pending_clear_color[8]{};
+    MTLClearColor clear_colors[8]{};
+    bool pending_clear_depth = false;
+    double clear_depth_value = 1.0;
+
+    auto flush_pending_clears = [&]() {
+        bool any_clear = pending_clear_depth;
+        for (int i = 0; i < 8; i++) {
+            if (pending_clear_color[i]) { any_clear = true; break; }
+        }
+        if (!any_clear || !current_rt || !cmd_buf) return;
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        bool has_target = false;
+        for (int i = 0; i < current_rt->n && i < 8; i++) {
+            if (current_rt->color[i] && pending_clear_color[i]) {
+                id<MTLTexture> ctex = ensure_texture(current_rt->color[i]);
+                if (ctex) {
+                    rpd.colorAttachments[i].texture = ctex;
+                    rpd.colorAttachments[i].loadAction = MTLLoadActionClear;
+                    rpd.colorAttachments[i].clearColor = clear_colors[i];
+                    rpd.colorAttachments[i].storeAction = MTLStoreActionStore;
+                    pending_clear_color[i] = false;
+                    has_target = true;
+                }
+            }
+        }
+        if (current_rt->depth && pending_clear_depth) {
+            id<MTLTexture> dtex = ensure_texture(current_rt->depth);
+            if (dtex) {
+                rpd.depthAttachment.texture = dtex;
+                rpd.depthAttachment.loadAction = MTLLoadActionClear;
+                rpd.depthAttachment.clearDepth = clear_depth_value;
+                rpd.depthAttachment.storeAction = MTLStoreActionStore;
+                pending_clear_depth = false;
+                has_target = true;
+            }
+        }
+        if (has_target) {
+            id<MTLRenderCommandEncoder> enc = [cmd_buf renderCommandEncoderWithDescriptor:rpd];
+            if (enc) [enc endEncoding];
+        }
+    };
+
     auto end_render_pass = [&]() {
         if (render_enc) {
             [render_enc endEncoding];
             render_enc = nil;
         }
+        flush_pending_clears();
     };
 
     auto ensure_render_pass = [&]() -> bool {
         if (render_enc) return true;
         if (!current_rt || !cmd_buf) return false;
+
+        static int memoryless_depth = -1;
+        if (memoryless_depth < 0) {
+            const char* env = getenv("RX_METAL_MEMORYLESS_DEPTH");
+            memoryless_depth = (env && atoi(env) != 0) ? 1 : 0;
+        }
 
         MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         bool has_target = false;
@@ -234,7 +295,13 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
                 id<MTLTexture> ctex = ensure_texture(current_rt->color[i]);
                 if (ctex) {
                     rpd.colorAttachments[i].texture = ctex;
-                    rpd.colorAttachments[i].loadAction = MTLLoadActionLoad;
+                    if (pending_clear_color[i]) {
+                        rpd.colorAttachments[i].loadAction = MTLLoadActionClear;
+                        rpd.colorAttachments[i].clearColor = clear_colors[i];
+                        pending_clear_color[i] = false;
+                    } else {
+                        rpd.colorAttachments[i].loadAction = MTLLoadActionLoad;
+                    }
                     rpd.colorAttachments[i].storeAction = MTLStoreActionStore;
                     has_target = true;
                 }
@@ -244,8 +311,14 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
             id<MTLTexture> dtex = ensure_texture(current_rt->depth);
             if (dtex) {
                 rpd.depthAttachment.texture = dtex;
-                rpd.depthAttachment.loadAction = MTLLoadActionLoad;
-                rpd.depthAttachment.storeAction = MTLStoreActionStore;
+                if (pending_clear_depth) {
+                    rpd.depthAttachment.loadAction = MTLLoadActionClear;
+                    rpd.depthAttachment.clearDepth = clear_depth_value;
+                    pending_clear_depth = false;
+                } else {
+                    rpd.depthAttachment.loadAction = MTLLoadActionLoad;
+                }
+                rpd.depthAttachment.storeAction = memoryless_depth ? MTLStoreActionDontCare : MTLStoreActionStore;
                 has_target = true;
             }
         }
@@ -403,34 +476,18 @@ void replay_recording(const uint8_t* cur, id<MTLCommandBuffer> cmd_buf) {
         case NOP_CLEAR_COLOR: {
             const auto* cc = reinterpret_cast<const nvn_p_clear_color*>(payload);
             if (current_rt && cc->index >= 0 && cc->index < current_rt->n && current_rt->color[cc->index]) {
-                end_render_pass();
-                id<MTLTexture> tex = ensure_texture(current_rt->color[cc->index]);
-                if (tex && cmd_buf) {
-                    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-                    rpd.colorAttachments[0].texture = tex;
-                    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-                    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-                    rpd.colorAttachments[0].clearColor = MTLClearColorMake(cc->rgba[0], cc->rgba[1], cc->rgba[2], cc->rgba[3]);
-                    id<MTLRenderCommandEncoder> enc = [cmd_buf renderCommandEncoderWithDescriptor:rpd];
-                    [enc endEncoding];
-                }
+                if (render_enc) end_render_pass();
+                pending_clear_color[cc->index] = true;
+                clear_colors[cc->index] = MTLClearColorMake(cc->rgba[0], cc->rgba[1], cc->rgba[2], cc->rgba[3]);
             }
             break;
         }
         case NOP_CLEAR_DS: {
             const auto* cds = reinterpret_cast<const nvn_p_clear_ds*>(payload);
             if (current_rt && current_rt->depth) {
-                end_render_pass();
-                id<MTLTexture> dtex = ensure_texture(current_rt->depth);
-                if (dtex && cmd_buf) {
-                    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-                    rpd.depthAttachment.texture = dtex;
-                    rpd.depthAttachment.loadAction = MTLLoadActionClear;
-                    rpd.depthAttachment.storeAction = MTLStoreActionStore;
-                    rpd.depthAttachment.clearDepth = cds->depth;
-                    id<MTLRenderCommandEncoder> enc = [cmd_buf renderCommandEncoderWithDescriptor:rpd];
-                    [enc endEncoding];
-                }
+                if (render_enc) end_render_pass();
+                pending_clear_depth = true;
+                clear_depth_value = cds->depth;
             }
             break;
         }
@@ -596,13 +653,48 @@ void nvn_present(const nvn_tex* t, const int crop[4]) {
             if (drawable) {
                 id<MTLCommandBuffer> cmd_buf = [mtl_queue commandBuffer];
                 id<MTLTexture> src_tex = t ? ensure_texture(t) : nil;
-                if (src_tex && src_tex.width == drawable.texture.width &&
-                    src_tex.height == drawable.texture.height &&
-                    src_tex.pixelFormat == drawable.texture.pixelFormat) {
-                    id<MTLBlitCommandEncoder> blit = [cmd_buf blitCommandEncoder];
-                    [blit copyFromTexture:src_tex toTexture:drawable.texture];
-                    [blit endEncoding];
-                } else {
+                bool presented = false;
+                if (src_tex) {
+                    if (src_tex.width == drawable.texture.width &&
+                        src_tex.height == drawable.texture.height &&
+                        src_tex.pixelFormat == drawable.texture.pixelFormat) {
+                        id<MTLBlitCommandEncoder> blit = [cmd_buf blitCommandEncoder];
+                        [blit copyFromTexture:src_tex toTexture:drawable.texture];
+                        [blit endEncoding];
+                        presented = true;
+                    }
+#if defined(HAVE_METALFX)
+                    else if (@available(macOS 13.0, *)) {
+                        static id mtl_spatial_scaler = nil;
+                        static uint32_t last_in_w = 0, last_in_h = 0;
+                        static uint32_t last_out_w = 0, last_out_h = 0;
+                        if (!mtl_spatial_scaler || last_in_w != src_tex.width || last_in_h != src_tex.height ||
+                            last_out_w != drawable.texture.width || last_out_h != drawable.texture.height) {
+                            MTLFXSpatialScalerDescriptor* desc = [[MTLFXSpatialScalerDescriptor alloc] init];
+                            desc.inputWidth = src_tex.width;
+                            desc.inputHeight = src_tex.height;
+                            desc.outputWidth = drawable.texture.width;
+                            desc.outputHeight = drawable.texture.height;
+                            desc.colorTextureFormat = src_tex.pixelFormat;
+                            desc.outputTextureFormat = drawable.texture.pixelFormat;
+                            desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+                            mtl_spatial_scaler = [desc newSpatialScalerWithDevice:mtl_device];
+                            last_in_w = (uint32_t)src_tex.width;
+                            last_in_h = (uint32_t)src_tex.height;
+                            last_out_w = (uint32_t)drawable.texture.width;
+                            last_out_h = (uint32_t)drawable.texture.height;
+                        }
+                        if (mtl_spatial_scaler) {
+                            id<MTLFXSpatialScaler> scaler = (id<MTLFXSpatialScaler>)mtl_spatial_scaler;
+                            scaler.colorTexture = src_tex;
+                            scaler.outputTexture = drawable.texture;
+                            [scaler encodeToCommandBuffer:cmd_buf];
+                            presented = true;
+                        }
+                    }
+#endif
+                }
+                if (!presented) {
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
                     rpd.colorAttachments[0].texture = drawable.texture;
                     rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
