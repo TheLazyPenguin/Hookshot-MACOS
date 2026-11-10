@@ -7,6 +7,11 @@ import os
 def host_march():
     want = ("avx2", "fma", "bmi2", "movbe")
     try:
+        import platform
+        machine = platform.machine().lower()
+        if machine in ("arm64", "aarch64"):
+            import sys
+            return "apple-m1" if sys.platform == "darwin" else "armv8-a+crc+crypto"
         if os.name == "nt":
             import ctypes
             pf = ctypes.windll.kernel32.IsProcessorFeaturePresent
@@ -15,6 +20,9 @@ def host_march():
             if pf(40):
                 return "x86-64-v3"
             return "x86-64-v2" if pf(38) else "x86-64"
+        import sys
+        if sys.platform == "darwin":
+            return "x86-64-v3"
         flags = open("/proc/cpuinfo").read().split("flags", 1)[1].split(chr(10), 1)[0].split()
         if all(f in flags for f in want):
             return "x86-64-v3"

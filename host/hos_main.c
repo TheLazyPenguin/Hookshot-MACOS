@@ -31,6 +31,9 @@ const char *hos_version(void) { return HOOKSHOT_VERSION; }   /* (discord_rpc.c's
 #include <sys/prctl.h>
 #include <sys/sysinfo.h>
 #endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -145,6 +148,7 @@ static int reserve_guest(void) {
        step: MAP_NORESERVE). Decommitting is madvise (host/posix/win32_posix.c VirtualFree): the pages read as zero. */
     void hos_commit_init(void);
     hos_commit_init();   /* (the crash report) */
+#if !defined(__APPLE__) && defined(SYS_memfd_create)
     /* The window is a memfd's, shared, so the Vulkan back end can hand the GPU the game's own pages as a dma-buf
        (udmabuf, gpu/vk/vk_memory.cpp import_dma_buf) instead of a host pointer: amdgpu checks every page of a host-pointer
        import again at each command submission, 15-45 ms a submission in Kokiri Forest. Pages of a shared mapping are freed
@@ -189,13 +193,22 @@ static int reserve_guest(void) {
             hos_log("mem: no memfd for the guest window (errno %d): anonymous memory", errno);
         }
     }
+#endif
+#if defined(__APPLE__)
+    if (mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != (void *)A64_HOST_BASE)
+        return 0;
+#else
     if (mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) != (void *)A64_HOST_BASE)
         return 0;
+#endif
+#if defined(MADV_NOHUGEPAGE)
     /* (issue 312) no transparent huge pages in the guest window: the renderer imports its pools as userptr memory, and every
        collapse khugepaged makes in them changes their mappings, which the kernel answers by pinning the pages again at the
        next submission: ~250 ms a submit on RADV while the GPU sat idle. HOS_THP=1: as before */
     if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, GUEST_SPACE, MADV_NOHUGEPAGE);
+#endif
 #ifdef __linux__
     /* (HOS_NO_THP=1, experiment: none outside the window either. With THP "always" 400-450 MB of the host heap's and the binary's bss are huge
        pages, each resident whole when any of its 2 MB is touched) */
@@ -211,7 +224,11 @@ static int reserve_guest(void) {
 int hos_guest_memfd = -1;
 int hos_posix_guest_memfd(void) { return hos_guest_memfd; }
 int hos_posix_guest_discard(void *p, size_t n) {
+#if defined(__APPLE__)
+    return madvise(p, n, MADV_DONTNEED);
+#else
     return madvise(p, n, hos_guest_memfd >= 0 ? MADV_REMOVE : MADV_DONTNEED);
+#endif
 }
 #endif
 
@@ -429,7 +446,7 @@ int hos_oot_is_player(Ctx *c, uint64_t actor) {
            recomp_load8(c, resource + 94) == 0;
 }
 
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
 /* OneShotAddOrRemovePouchContent (f_828d4a70) for one pouch content by actor name: delta > 0 adds, < 0 removes.
    Returns the event status (top bits of the result word), or -1 when the pouch is not ready. */
 static int oot_pouch_change(Ctx *c, const char *name, int delta) {
@@ -1039,7 +1056,7 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
 #endif
 
 int hos_oot_flight_shortcut_ready(void) {
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
     const int64_t seen = __atomic_load_n(&flight_player_seen, __ATOMIC_RELAXED);
     return seen && hos_now_ns() - seen < 250000000;
 #else
@@ -1047,7 +1064,7 @@ int hos_oot_flight_shortcut_ready(void) {
 #endif
 }
 
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
 static void oot_write_flight_rotation(Ctx *c, uint64_t matrix) {
     const float s = sinf(flight_transform_yaw), co = cosf(flight_transform_yaw);
     const float rotation[3][3] = {{co, 0, s}, {0, 1, 0}, {-s, 0, co}};
@@ -1062,7 +1079,7 @@ static void oot_write_flight_rotation(Ctx *c, uint64_t matrix) {
 #endif
 
 void hos_oot_flight_rotation(Ctx *c, uint64_t controller, uint64_t matrix) {
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
     if (flight_transform_controller == controller) oot_write_flight_rotation(c, matrix);
 #else
     (void)c;
@@ -1072,7 +1089,7 @@ void hos_oot_flight_rotation(Ctx *c, uint64_t controller, uint64_t matrix) {
 }
 
 void hos_oot_flight_pose(Ctx *c, uint64_t actor, uint64_t matrix) {
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
     if (flight_pose_actor == actor) {
         flight_pose_actor = 0;
         oot_write_flight_rotation(c, matrix);
@@ -1085,7 +1102,7 @@ void hos_oot_flight_pose(Ctx *c, uint64_t actor, uint64_t matrix) {
 }
 
 void hos_oot_lift_player(Ctx *c, uint64_t actor) {
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
     flight_pose_actor = 0;
     if (recomp_load64(c, actor) != 0x84b45e18ULL) return;
     const uint64_t components = recomp_load64(c, actor + 624);
@@ -1104,7 +1121,7 @@ void hos_oot_lift_player(Ctx *c, uint64_t actor) {
 #endif
 }
 
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
 static void oot_build_free_view(Ctx *c, uint64_t view, uint64_t out) {
     int rx_option(int id, int otherwise);
     static uint64_t active_view;
@@ -1165,7 +1182,7 @@ static void oot_build_free_view(Ctx *c, uint64_t view, uint64_t out) {
 #endif
 
 void hos_oot_free_view(Ctx *c, uint64_t view) {
-#if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)   /* (the debug tools: host/posix has what they call) */
     int rx_option(int id, int otherwise);
     if (!view || recomp_load64(c, view) != 0x84c18a88ULL) return;
 
@@ -1223,6 +1240,16 @@ static void memory_notice(void) {
     struct sysinfo si;
     if (sysinfo(&si)) return;
     ram = ((unsigned long long)si.totalram * si.mem_unit) >> 20, swap = ((unsigned long long)si.totalswap * si.mem_unit) >> 20;
+#elif defined(__APPLE__)
+    uint64_t mem = 0;
+    size_t len = sizeof(mem);
+    int mib[2] = {CTL_HW, HW_MEMSIZE};
+    if (sysctl(mib, 2, &mem, &len, NULL, 0) == 0) ram = mem >> 20;
+    struct xsw_usage xsu;
+    len = sizeof(xsu);
+    mib[0] = CTL_VM;
+    mib[1] = VM_SWAPUSAGE;
+    if (sysctl(mib, 2, &xsu, &len, NULL, 0) == 0) swap = xsu.xsu_total >> 20;
 #else
     return;
 #endif

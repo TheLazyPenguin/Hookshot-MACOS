@@ -9,12 +9,17 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <limits.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#else
 #include <linux/futex.h>
+#include <ucontext.h>
+#endif
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
-#include <ucontext.h>
 
 /* the guest window (third_party/a64-kit/rt/a64.h A64_HOST_BASE, host/hos.h HOS_GUEST_SPACE): one mapping, all of it
    readable and writable, which VirtualQuery reports as committed without asking the kernel */
@@ -78,9 +83,33 @@ static void monitor_init(pthread_mutex_t *mu, pthread_cond_t *cv) {
     } while (0)
 
 /* ---- futexes: condition variables, WaitOnAddress ---- */
+#if defined(__APPLE__)
+extern int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+extern int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
+#define UL_COMPARE_AND_WAIT 1
+#define ULF_WAKE_ALL 0x00000100
+#define FUTEX_WAIT_PRIVATE 0
+#define FUTEX_WAKE_PRIVATE 1
+static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) {
+    if (op == FUTEX_WAKE_PRIVATE) {
+        uint32_t flags = UL_COMPARE_AND_WAIT;
+        if (v > 1) flags |= ULF_WAKE_ALL;
+        return __ulock_wake(flags, (void *)a, 0);
+    } else if (op == FUTEX_WAIT_PRIVATE) {
+        uint32_t timeout_us = 0;
+        if (ts) {
+            uint64_t us = (uint64_t)ts->tv_sec * 1000000ULL + (uint64_t)ts->tv_nsec / 1000ULL;
+            timeout_us = us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+        }
+        return __ulock_wait(UL_COMPARE_AND_WAIT, (void *)a, v, timeout_us);
+    }
+    return -1;
+}
+#else
 static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) {
     return syscall(SYS_futex, a, op, v, ts, NULL, 0);
 }
+#endif
 static struct timespec rel_ms(DWORD ms) {
     struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
     return ts;
@@ -501,7 +530,58 @@ DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms) {
     }
 }
 
+#ifndef MAP_STACK
+#define MAP_STACK 0
+#endif
+
 /* ---- fibers ---- */
+#if defined(__APPLE__) && defined(__aarch64__)
+typedef struct {
+    uint64_t x[12]; /* x19-x30 (x29=fp, x30=lr) */
+    uint64_t sp;
+    double d[8];    /* d8-d15 */
+} FiberContext;
+
+__attribute__((naked))
+static void aarch64_swap_fiber(FiberContext *from, const FiberContext *to) {
+    __asm__ volatile (
+        "stp x19, x20, [x0, #0]\n"
+        "stp x21, x22, [x0, #16]\n"
+        "stp x23, x24, [x0, #32]\n"
+        "stp x25, x26, [x0, #48]\n"
+        "stp x27, x28, [x0, #64]\n"
+        "stp x29, x30, [x0, #80]\n"
+        "mov x9, sp\n"
+        "str x9, [x0, #96]\n"
+        "stp d8, d9, [x0, #104]\n"
+        "stp d10, d11, [x0, #120]\n"
+        "stp d12, d13, [x0, #136]\n"
+        "stp d14, d15, [x0, #152]\n"
+
+        "ldp d8, d9, [x1, #104]\n"
+        "ldp d10, d11, [x1, #120]\n"
+        "ldp d12, d13, [x1, #136]\n"
+        "ldp d14, d15, [x1, #152]\n"
+        "ldr x9, [x1, #96]\n"
+        "mov sp, x9\n"
+        "ldp x29, x30, [x1, #80]\n"
+        "ldp x27, x28, [x1, #64]\n"
+        "ldp x25, x26, [x1, #48]\n"
+        "ldp x23, x24, [x1, #32]\n"
+        "ldp x21, x22, [x1, #16]\n"
+        "ldp x19, x20, [x1, #0]\n"
+        "ret\n"
+    );
+}
+
+typedef struct {
+    FiberContext ctx;
+    void *param, *stack;
+    size_t stack_size;
+    LPFIBER_START_ROUTINE fn;
+    int is_thread;
+} Fiber;
+#else
 typedef struct {
     ucontext_t uc;
     void *param, *stack;
@@ -509,6 +589,7 @@ typedef struct {
     LPFIBER_START_ROUTINE fn;
     int is_thread;
 } Fiber;
+#endif
 static __thread Fiber *cur_fiber;
 void *ConvertThreadToFiberEx(void *param, DWORD flags) {
     (void)flags;
@@ -524,11 +605,19 @@ BOOL ConvertFiberToThread(void) {
     cur_fiber = NULL;
     return TRUE;
 }
+#if defined(__APPLE__) && defined(__aarch64__)
+static void fiber_entry(void) {
+    Fiber *f = cur_fiber;
+    f->fn(f->param);
+    ExitThread(0);
+}
+#else
 static void fiber_start(unsigned lo, unsigned hi) {
     Fiber *f = (Fiber *)(uintptr_t)((uint64_t)hi << 32 | lo);
     f->fn(f->param);
     ExitThread(0);   /* (a fiber function that returns ends its thread, as on Windows) */
 }
+#endif
 void *CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_ROUTINE fn, void *param) {
     (void)flags;
     size_t size = reserve > commit ? reserve : commit;
@@ -536,15 +625,21 @@ void *CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_RO
     size = (size + 0xFFFF) & ~(size_t)0xFFFF;
     void *stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
     if (stack == MAP_FAILED) { last_error = ERROR_NOT_ENOUGH_MEMORY; return NULL; }
-    mprotect(stack, 4096, PROT_NONE);   /* (a guard page at the bottom) */
+    mprotect(stack, sysconf(_SC_PAGESIZE), PROT_NONE);   /* (a guard page at the bottom) */
     Fiber *f = (Fiber *)calloc(1, sizeof *f);
     f->param = param, f->fn = fn, f->stack = stack, f->stack_size = size;
+#if defined(__APPLE__) && defined(__aarch64__)
+    f->ctx.sp = ((uint64_t)(uintptr_t)stack + size) & ~15ULL;
+    f->ctx.x[11] = (uint64_t)(uintptr_t)fiber_entry; /* lr = x30 */
+    f->ctx.x[10] = 0; /* fp = x29 */
+#else
     getcontext(&f->uc);
     f->uc.uc_stack.ss_sp = stack;
     f->uc.uc_stack.ss_size = size;
     f->uc.uc_link = NULL;
     const uint64_t p = (uint64_t)(uintptr_t)f;
     makecontext(&f->uc, (void (*)(void))fiber_start, 2, (unsigned)p, (unsigned)(p >> 32));
+#endif
     return f;
 }
 void *CreateFiber(SIZE_T stack, LPFIBER_START_ROUTINE fn, void *param) { return CreateFiberEx(stack, stack, 0, fn, param); }
@@ -552,7 +647,11 @@ void SwitchToFiber(void *to) {
     Fiber *from = cur_fiber;
     if (!from || from == to) return;
     cur_fiber = (Fiber *)to;
+#if defined(__APPLE__) && defined(__aarch64__)
+    aarch64_swap_fiber(&from->ctx, &((Fiber *)to)->ctx);
+#else
     swapcontext(&from->uc, &((Fiber *)to)->uc);
+#endif
 }
 void DeleteFiber(void *p) {
     Fiber *f = (Fiber *)p;
@@ -606,7 +705,11 @@ BOOL GetLogicalProcessorInformation(SYSTEM_LOGICAL_PROCESSOR_INFORMATION *info, 
 }
 void GetSystemInfo(SYSTEM_INFO *si) {
     memset(si, 0, sizeof *si);
+#if defined(__aarch64__)
+    si->wProcessorArchitecture = 12;   /* (PROCESSOR_ARCHITECTURE_ARM64) */
+#else
     si->wProcessorArchitecture = 9;   /* (PROCESSOR_ARCHITECTURE_AMD64) */
+#endif
     si->dwPageSize = (DWORD)sysconf(_SC_PAGESIZE);
     si->dwAllocationGranularity = 0x10000;
     si->dwNumberOfProcessors = (DWORD)sysconf(_SC_NPROCESSORS_ONLN);
@@ -617,6 +720,13 @@ void GetSystemInfo(SYSTEM_INFO *si) {
     si->lpMaximumApplicationAddress = (void *)0x7FFFFFFEFFFFULL;
 }
 void OutputDebugStringA(LPCSTR s) { fputs(s, stderr); }
+
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0
+#endif
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0
+#endif
 
 /* ---- memory ---- */
 static int prot_of(DWORD p) {
@@ -642,7 +752,7 @@ static int discard_pages(void *p, size_t n) {
     return madvise(p, n, MADV_DONTNEED);
 }
 void *VirtualAlloc(void *addr, SIZE_T size, DWORD type, DWORD protect) {
-    const uintptr_t page = 4096;
+    const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
     if (type & MEM_RESET) {   /* (the contents are not wanted any more: they read as zero after this) */
         const uintptr_t lo = ((uintptr_t)addr + page - 1) & ~(page - 1), hi = ((uintptr_t)addr + size) & ~(page - 1);
         if (hi > lo) discard_pages((void *)lo, hi - lo);
@@ -670,7 +780,8 @@ void *VirtualAlloc(void *addr, SIZE_T size, DWORD type, DWORD protect) {
 }
 BOOL VirtualFree(void *addr, SIZE_T size, DWORD type) {
     if (type & MEM_DECOMMIT) {   /* (kept mapped: decommitted memory reads as zero when touched again) */
-        const uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)4095, hi = ((uintptr_t)addr + size + 4095) & ~(uintptr_t)4095;
+        const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+        const uintptr_t lo = (uintptr_t)addr & ~(page - 1), hi = ((uintptr_t)addr + size + page - 1) & ~(page - 1);
         return discard_pages((void *)lo, hi - lo) == 0 ? TRUE : fail_errno();
     }
     if (type & MEM_RELEASE) {
@@ -689,14 +800,16 @@ BOOL VirtualFree(void *addr, SIZE_T size, DWORD type) {
     return FALSE;
 }
 BOOL VirtualProtect(void *addr, SIZE_T size, DWORD protect, DWORD *old) {
-    const uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)4095, hi = ((uintptr_t)addr + size + 4095) & ~(uintptr_t)4095;
+    const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t lo = (uintptr_t)addr & ~(page - 1), hi = ((uintptr_t)addr + size + page - 1) & ~(page - 1);
     if (old) *old = PAGE_READWRITE;
     return mprotect((void *)lo, hi - lo, prot_of(protect)) == 0 ? TRUE : fail_errno();
 }
 SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size) {
     if (size < sizeof *mbi) return 0;
     memset(mbi, 0, sizeof *mbi);
-    const uintptr_t a = (uintptr_t)addr, page = a & ~(uintptr_t)4095;
+    const uintptr_t page_sz = (uintptr_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t a = (uintptr_t)addr, page = a & ~(page_sz - 1);
     mbi->BaseAddress = (void *)page;
     if (a >= GUEST_LO && a < GUEST_HI) {
         mbi->AllocationBase = (void *)GUEST_LO;
@@ -704,6 +817,36 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
         mbi->State = MEM_COMMIT, mbi->Protect = mbi->AllocationProtect = PAGE_READWRITE, mbi->Type = 0x20000;
         return sizeof *mbi;
     }
+#if defined(__APPLE__)
+    vm_address_t vaddr = (vm_address_t)page;
+    vm_size_t vsize = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+    kern_return_t kr = vm_region_64(mach_task_self(), &vaddr, &vsize, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name);
+    if (kr != KERN_SUCCESS) {
+        mbi->State = MEM_FREE;
+        mbi->Protect = PAGE_NOACCESS;
+        mbi->RegionSize = page_sz;
+        return sizeof *mbi;
+    }
+    if ((vm_address_t)page < vaddr) {
+        mbi->State = MEM_FREE;
+        mbi->Protect = PAGE_NOACCESS;
+        mbi->RegionSize = vaddr - (vm_address_t)page;
+        return sizeof *mbi;
+    }
+    mbi->AllocationBase = (void *)vaddr;
+    mbi->RegionSize = vsize - (page - vaddr);
+    const int r = (info.protection & VM_PROT_READ) != 0;
+    const int w = (info.protection & VM_PROT_WRITE) != 0;
+    const int x = (info.protection & VM_PROT_EXECUTE) != 0;
+    mbi->State = (r || w || x) ? MEM_COMMIT : MEM_RESERVE;
+    mbi->Protect = mbi->AllocationProtect = !r ? PAGE_NOACCESS : x ? (w ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ)
+                                                                   : (w ? PAGE_READWRITE : PAGE_READONLY);
+    mbi->Type = 0x20000;
+    return sizeof *mbi;
+#else
     /* (anything else: the kernel's map of the process) */
     FILE *f = fopen("/proc/self/maps", "r");
     char line[512];
@@ -730,18 +873,34 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
     }
     if (f) fclose(f);
     return sizeof *mbi;
+#endif
 }
 
 /* ---- modules ---- */
 static void exe_path(char *out, size_t cap) {
+#if defined(__APPLE__)
+    uint32_t size = (uint32_t)cap;
+    if (_NSGetExecutablePath(out, &size) == 0) {
+        char real[PATH_MAX];
+        if (realpath(out, real)) snprintf(out, cap, "%s", real);
+    } else {
+        out[0] = 0;
+    }
+#else
     const ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     out[n > 0 ? n : 0] = 0;
+#endif
 }
-/* a Windows library name, as the Linux one: SDL3.dll -> libSDL3.so.0, SDL2.dll -> libSDL2-2.0.so.0,
-   vulkan-1.dll -> libvulkan.so.1, x.dll -> x.so */
-static const char *linux_name(const char *base) {
+/* a Windows library name, as the Linux/Darwin one: SDL3.dll -> libSDL3, SDL2.dll -> libSDL2,
+   vulkan-1.dll -> libvulkan, x.dll -> x.dylib/x.so */
+static const char *posix_name(const char *base) {
+#if defined(__APPLE__)
+    static const char *map[][2] = {{"sdl3.dll", "libSDL3.dylib"}, {"sdl2.dll", "libSDL2.dylib"},
+                                   {"vulkan-1.dll", "libvulkan.1.dylib"}};
+#else
     static const char *map[][2] = {{"sdl3.dll", "libSDL3.so.0"}, {"sdl2.dll", "libSDL2-2.0.so.0"},
                                    {"vulkan-1.dll", "libvulkan.so.1"}};
+#endif
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
         if (!strcasecmp(base, map[i][0])) return map[i][1];
     return NULL;
@@ -753,17 +912,45 @@ HMODULE LoadLibraryA(LPCSTR name) {
     for (char *p = path; *p; p++) if (*p == '\\') *p = '/';
     char *slash = strrchr(path, '/');
     char *base = slash ? slash + 1 : path;
-    const char *mapped = linux_name(base);
+    const char *mapped = posix_name(base);
     if (mapped) {
         snprintf(base, sizeof path - (size_t)(base - path), "%s", mapped);
     } else {
         const size_t n = strlen(path);
         if (n > 4 && !strcasecmp(path + n - 4, ".dll")) {
             if (!slash) return NULL;   /* (a Windows system library: kernel32, xinput, imm32 ...) */
+#if defined(__APPLE__)
+            strcpy(path + n - 4, ".dylib");
+#else
             strcpy(path + n - 4, ".so");
+#endif
         }
     }
     HMODULE m = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#if defined(__APPLE__)
+    if (!m && mapped) {
+        char brew_path[PATH_MAX];
+        snprintf(brew_path, sizeof brew_path, "/opt/homebrew/lib/%s", mapped);
+        m = dlopen(brew_path, RTLD_NOW | RTLD_LOCAL);
+        if (!m) {
+            snprintf(brew_path, sizeof brew_path, "/usr/local/lib/%s", mapped);
+            m = dlopen(brew_path, RTLD_NOW | RTLD_LOCAL);
+        }
+        if (!m && !strcmp(mapped, "libvulkan.1.dylib")) {
+            const char *mvk_candidates[] = {
+                "libvulkan.dylib",
+                "libMoltenVK.dylib",
+                "/opt/homebrew/lib/libvulkan.dylib",
+                "/opt/homebrew/lib/libMoltenVK.dylib",
+                "/usr/local/lib/libvulkan.dylib",
+                "/usr/local/lib/libMoltenVK.dylib"
+            };
+            for (size_t i = 0; !m && i < sizeof(mvk_candidates) / sizeof(mvk_candidates[0]); i++) {
+                m = dlopen(mvk_candidates[i], RTLD_NOW | RTLD_LOCAL);
+            }
+        }
+    }
+#endif
     if (!m) last_error = ERROR_FILE_NOT_FOUND;
     return m;
 }
@@ -798,8 +985,10 @@ DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD cap) {
             snprintf(path, sizeof path, "%s", di.dli_fname);
         if (!path[0]) exe_path(path, sizeof path);
     } else {
+#if !defined(__APPLE__)
         void *lm = NULL;   /* (a handle from LoadLibraryA) */
         if (dlinfo(m, RTLD_DI_LINKMAP, &lm) == 0 && lm) snprintf(path, sizeof path, "%s", ((const char **)lm)[1]);
+#endif
     }
     if (!cap) return 0;
     const size_t n = strlen(path);
@@ -1086,6 +1275,43 @@ static LPTOP_LEVEL_EXCEPTION_FILTER unhandled;
 static struct sigaction previous[32];
 static pthread_mutex_t handlers_mu = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(__APPLE__) && defined(__aarch64__)
+static void context_from(CONTEXT *c, const ucontext_t *uc) {
+    memset(c, 0, sizeof *c);
+    const arm_thread_state64_t *ss = (const arm_thread_state64_t *)&uc->uc_mcontext->__ss;
+    c->Rip = ss->__pc;
+    c->Rsp = ss->__sp;
+    c->Rbp = ss->__fp;
+    c->Pc = ss->__pc;
+    c->Sp = ss->__sp;
+    for (int i = 0; i < 29; i++) c->X[i] = ss->__x[i];
+    c->X[29] = ss->__fp;
+    c->X[30] = ss->__lr;
+    c->ContextFlags = CONTEXT_FULL;
+}
+static void context_to(ucontext_t *uc, const CONTEXT *c) {
+    arm_thread_state64_t *ss = (arm_thread_state64_t *)&uc->uc_mcontext->__ss;
+    ss->__pc = c->Rip ? c->Rip : c->Pc;
+    ss->__sp = c->Rsp ? c->Rsp : c->Sp;
+    ss->__fp = c->Rbp ? c->Rbp : c->X[29];
+}
+#elif defined(__aarch64__)
+static void context_from(CONTEXT *c, const ucontext_t *uc) {
+    memset(c, 0, sizeof *c);
+    c->Rip = uc->uc_mcontext.pc;
+    c->Rsp = uc->uc_mcontext.sp;
+    c->Rbp = uc->uc_mcontext.regs[29];
+    c->Pc = uc->uc_mcontext.pc;
+    c->Sp = uc->uc_mcontext.sp;
+    for (int i = 0; i < 31; i++) c->X[i] = uc->uc_mcontext.regs[i];
+    c->ContextFlags = CONTEXT_FULL;
+}
+static void context_to(ucontext_t *uc, const CONTEXT *c) {
+    uc->uc_mcontext.pc = c->Rip ? c->Rip : c->Pc;
+    uc->uc_mcontext.sp = c->Rsp ? c->Rsp : c->Sp;
+    uc->uc_mcontext.regs[29] = c->Rbp ? c->Rbp : c->X[29];
+}
+#else
 static void context_from(CONTEXT *c, const ucontext_t *uc) {
     const greg_t *g = uc->uc_mcontext.gregs;
     c->Rax = (DWORD64)g[REG_RAX], c->Rcx = (DWORD64)g[REG_RCX], c->Rdx = (DWORD64)g[REG_RDX], c->Rbx = (DWORD64)g[REG_RBX];
@@ -1102,6 +1328,7 @@ static void context_to(ucontext_t *uc, const CONTEXT *c) {
     g[REG_R12] = (greg_t)c->R12, g[REG_R13] = (greg_t)c->R13, g[REG_R14] = (greg_t)c->R14, g[REG_R15] = (greg_t)c->R15;
     g[REG_RIP] = (greg_t)c->Rip;
 }
+#endif
 static void on_signal(int sig, siginfo_t *si, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     EXCEPTION_RECORD rec;
@@ -1114,7 +1341,13 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
     rec.ExceptionAddress = (void *)(uintptr_t)ctx.Rip;
     if (sig == SIGSEGV || sig == SIGBUS) {
         rec.NumberParameters = 2;
+#if defined(__linux__) && defined(REG_ERR)
         rec.ExceptionInformation[0] = (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;   /* (1: a write) */
+#elif defined(__APPLE__)
+        rec.ExceptionInformation[0] = (si->si_code == SEGV_ACCERR) ? 1 : 0;
+#else
+        rec.ExceptionInformation[0] = 0;
+#endif
         rec.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
     }
     EXCEPTION_POINTERS ep = {&rec, &ctx};

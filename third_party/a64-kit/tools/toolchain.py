@@ -51,7 +51,17 @@ def lld_link():
     return path
 
 
+def darwin():
+    import sys
+    return sys.platform == "darwin" or os.environ.get("RX_TARGET", "").lower() == "darwin"
+
+
 def native_target(host=False):
+    if darwin():
+        import platform
+        machine = platform.machine().lower()
+        arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
+        return ["--target=" + arch + "-apple-macos13.0"]
     if mingw(host):   # (-fms-extensions: __try/__except and __declspec, which clang takes on this target too)
         return ["--target=x86_64-w64-mingw32", "-fms-extensions", "-D_CRT_SECURE_NO_WARNINGS"]
     return ["--target=x86_64-pc-windows-msvc", "-fms-extensions", "-D_CRT_SECURE_NO_WARNINGS"] if os.name == "nt" else []

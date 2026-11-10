@@ -11,6 +11,7 @@
    Frames are written as <module>+<offset from its load base>: hookshot and hookshot_vk.so,
    offsets as in their linker maps (position-independent, based at 0). */
 #include "../hos.h"
+#if !defined(__APPLE__)
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -32,8 +33,10 @@
 #endif
 
 int hos_thread_handles(HANDLE *out, const char **names, int max);   /* hos_thread.c */
+#endif
 void hos_prof_start(void);
 
+#if !defined(__APPLE__)
 /* ---- the process's threads: id, CPU time, name (the guest thread's, else the thread's own: SetThreadDescription) ---- */
 typedef struct { int tid; uint64_t cpu_ns; char name[64]; int guest; } Task;
 
@@ -493,7 +496,10 @@ static DWORD WINAPI watch_thread(void *p) {
     return 0;
 }
 
+#endif
+
 void hos_prof_start(void) {
+#if !defined(__APPLE__)
     const char *tt = getenv("HOS_THREAD_TIMES");
     if (tt && atoi(tt) > 0) CreateThread(NULL, 0, thread_times_thread, (void *)(uintptr_t)atoi(tt), 0, NULL);
     const char *e = getenv("HOS_PROFILE");
@@ -504,4 +510,5 @@ void hos_prof_start(void) {
     if (all && *all) CreateThread(NULL, 0, sample_all_thread, (void *)all, 0, NULL);
     const char *watch = getenv("HOS_WATCH");
     if (watch && *watch) CreateThread(NULL, 0, watch_thread, (void *)watch, 0, NULL);
+#endif
 }

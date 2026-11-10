@@ -100,8 +100,48 @@ __attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int v
         "jmpq *72(%rcx)\n\t");
 }
 
+#elif defined(__aarch64__)
+/* (arm64 / macOS Apple Silicon) AAPCS64 callee-saved registers: x19-x28, x29 (fp), x30 (lr), sp, and d8-d15.
+   buf in x0, value in w1 */
+__attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
+    __asm__ volatile(
+        "stp x19, x20, [x0, #0]\n\t"
+        "stp x21, x22, [x0, #16]\n\t"
+        "stp x23, x24, [x0, #32]\n\t"
+        "stp x25, x26, [x0, #48]\n\t"
+        "stp x27, x28, [x0, #64]\n\t"
+        "stp x29, x30, [x0, #80]\n\t"
+        "mov x1, sp\n\t"
+        "str x1, [x0, #96]\n\t"
+        "stp d8, d9, [x0, #104]\n\t"
+        "stp d10, d11, [x0, #120]\n\t"
+        "stp d12, d13, [x0, #136]\n\t"
+        "stp d14, d15, [x0, #152]\n\t"
+        "mov w0, #0\n\t"
+        "ret\n\t");
+}
+
+__attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int value) {
+    __asm__ volatile(
+        "ldp x19, x20, [x0, #0]\n\t"
+        "ldp x21, x22, [x0, #16]\n\t"
+        "ldp x23, x24, [x0, #32]\n\t"
+        "ldp x25, x26, [x0, #48]\n\t"
+        "ldp x27, x28, [x0, #64]\n\t"
+        "ldp x29, x30, [x0, #80]\n\t"
+        "ldr x2, [x0, #96]\n\t"
+        "mov sp, x2\n\t"
+        "ldp d8, d9, [x0, #104]\n\t"
+        "ldp d10, d11, [x0, #120]\n\t"
+        "ldp d12, d13, [x0, #136]\n\t"
+        "ldp d14, d15, [x0, #152]\n\t"
+        "cmp w1, #0\n\t"
+        "csinc w0, w1, wzr, ne\n\t"
+        "ret\n\t");
+}
+
 #else
-/* (linux) the System V ABI's: the buffer as above, its callee-saved registers only (rbx rbp r12-r15: rdi, rsi and the
+/* (linux x86-64) the System V ABI's: the buffer as above, its callee-saved registers only (rbx rbp r12-r15: rdi, rsi and the
    xmm registers are the caller's to keep there), buf in rdi and the value in esi */
 __attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
     __asm__ volatile(

@@ -83,6 +83,22 @@ void logf(const char* fmt, ...) {
 
 namespace {
 
+#ifndef VK_KHR_portability_enumeration
+#define VK_KHR_portability_enumeration 1
+#define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
+#endif
+#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+#ifndef VK_KHR_portability_subset
+#define VK_KHR_portability_subset 1
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#endif
+#ifndef VK_EXT_metal_surface
+#define VK_EXT_metal_surface 1
+#define VK_EXT_METAL_SURFACE_EXTENSION_NAME "VK_EXT_metal_surface"
+#endif
+
 bool has_extension(const std::vector<VkExtensionProperties>& all, const char* name) {
     for (const auto& e : all)
         if (!std::strcmp(e.extensionName, name)) return true;
@@ -92,13 +108,33 @@ bool has_extension(const std::vector<VkExtensionProperties>& all, const char* na
 bool create_instance() {
     uint32_t version = VK_API_VERSION_1_0;
     if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&version);
+#ifdef __APPLE__
+    if (version < VK_API_VERSION_1_2) {
+        logf("vk: the Vulkan loader is %u.%u: 1.2 is needed", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version));
+        return false;
+    }
+#else
     if (version < VK_API_VERSION_1_3) {
         logf("vk: the Vulkan loader is %u.%u: 1.3 is needed", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version));
         return false;
     }
+#endif
 #ifdef _WIN32
     const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     const uint32_t n_exts = 2;
+#elif defined(__APPLE__)
+    const char* exts[4] = {VK_KHR_SURFACE_EXTENSION_NAME};
+    uint32_t n_exts = 1;
+    {
+        uint32_t n = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> all(n);
+        vkEnumerateInstanceExtensionProperties(nullptr, &n, all.data());
+        for (const char* want : {VK_EXT_METAL_SURFACE_EXTENSION_NAME, "VK_MVK_macos_surface"})
+            if (has_extension(all, want)) { exts[n_exts++] = want; break; }
+        if (has_extension(all, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+            exts[n_exts++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    }
 #else
     // (linux: every window system's surface the loader has, for whichever one SDL's window is on: X11 or Wayland)
     const char* exts[4] = {VK_KHR_SURFACE_EXTENSION_NAME};
@@ -131,6 +167,13 @@ bool create_instance() {
     }
     ci.enabledExtensionCount = (uint32_t)ext_list.size();
     ci.ppEnabledExtensionNames = ext_list.data();
+#ifdef __APPLE__
+    for (const char* e : ext_list)
+        if (!std::strcmp(e, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+            ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+            break;
+        }
+#endif
     // RX_VK_VALIDATION=1: the Khronos validation layer (when installed)
     const char* layer = "VK_LAYER_KHRONOS_validation";
     if (getenv("RX_VK_VALIDATION")) ci.enabledLayerCount = 1, ci.ppEnabledLayerNames = &layer;
@@ -156,7 +199,11 @@ bool pick_device() {
         vkGetPhysicalDeviceProperties(all[i], &p);
         logf("vk: device %u: %s, Vulkan %u.%u, driver %#x, type %d", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
              VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion, (int)p.deviceType);
+#ifdef __APPLE__
+        if (p.apiVersion >= VK_API_VERSION_1_2) {
+#else
         if (p.apiVersion >= VK_API_VERSION_1_3) {
+#endif
             valid_gpus.push_back(i);
             gpu_device_names.push_back(p.deviceName);
         }
@@ -202,7 +249,11 @@ bool pick_device() {
         }
     }
     if (best < 0) {
+#ifdef __APPLE__
+        logf("vk: no Vulkan 1.2+ GPU");
+#else
         logf("vk: no Vulkan 1.3 GPU");
+#endif
         return false;
     }
     dev.physical = all[best];
@@ -221,6 +272,8 @@ bool create_device() {
         flag = has_extension(exts, name);
         if (flag) want.push_back(name);
     };
+    bool portability_subset = false;
+    optional(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME, portability_subset);
     // (RX_VK_FORCE_MESH_FALLBACK=1, a test: mesh shaders not used where they are, so the no-mesh fallback the GTX 10xx and RX 5000
     // cards run (issue 640) can be tried on any GPU)
     if (getenv("RX_VK_FORCE_MESH_FALLBACK") && atoi(getenv("RX_VK_FORCE_MESH_FALLBACK")) != 0) dev.mesh_shader = false;

@@ -41,7 +41,7 @@ def condition(expr, defined):
         return None
     body = re.sub(r"/\*.*?\*/|//.*", "", m.group(1)).strip()
     names = re.findall(r"defined\s*\(\s*(\w+)\s*\)", body)
-    if not names or any(n not in ("_WIN32", "__linux__") for n in names):
+    if not names or any(n not in ("_WIN32", "__linux__", "__APPLE__") for n in names):
         return None
     rest = re.sub(r"defined\s*\(\s*\w+\s*\)", "", body).replace("||", "").replace("!", "").strip()
     if rest:

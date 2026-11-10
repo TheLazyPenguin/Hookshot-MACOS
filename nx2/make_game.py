@@ -45,12 +45,18 @@ BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile
 STARTED = time.time()   # (the build's total time, kept in build_times.json and said as @@times)
 sys.path[:0] = [HERE, os.path.join(ROOT, "third_party", "a64-kit", "tools")]   # (python -I leaves the script folder off)
 import toolchain as _toolchain
-# (hookshot) RX_TARGET=windows on Linux: the Windows game, with llvm-mingw's Linux release (HOOKSHOT_MINGW, or llvm-mingw
-# beside the builder), to run under Proton or copy to a Windows PC
-LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
+DARWIN = _toolchain.darwin()
+WINDOWS = _toolchain.windows()
+LINUX = not WINDOWS and not DARWIN
+CROSS = WINDOWS and os.name != "nt"
 # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
 # library" three times and no controller worked: Discord #bug-reporting, 11-08)
-BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
+if DARWIN:
+    BESIDE = ["hookshot", "hookshot_vk.dylib"]
+elif LINUX:
+    BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"]
+else:
+    BESIDE = ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
 LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
              ("it", "Italian"), ("es", "Spanish (Spain)"), ("es-419", "Spanish (Latin America)"), ("pt-BR", "Portuguese (Brazil)"), ("nl", "Dutch"),
              ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
@@ -487,25 +493,24 @@ def check_cpp_library(toolchain):
 
 
 def check_linux_compiler():
-    """(linux) A C compiler that builds and links a program here (the AppImage's own clang and sysroot, else the system's):
-    found now, not 40 minutes in"""
+    """(linux/darwin) A C compiler that builds and links a program here: found now, not 40 minutes in"""
     sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
     import toolchain
     cc = toolchain.find("clang")
     if not os.path.isfile(cc):
-        fail("No C compiler was found. Install clang (and lld), or use the Hookshot AppImage, which brings its own.")
+        fail("No C compiler was found. Install clang (and lld on Linux, or Xcode Command Line Tools on macOS).")
     sysroot = os.environ.get("HOOKSHOT_SYSROOT")
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "t.c")
         with open(src, "w") as f:
             f.write(chr(10).join(("#include <stdio.h>", "#include <pthread.h>", "int main(void) { return 0; }", "")))
-        r = subprocess.run([cc] + (["--sysroot=" + sysroot] if sysroot else []) + ["-fuse-ld=lld", src, "-o", os.path.join(d, "t")],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        cmd = [cc] + toolchain.native_target() + (["--sysroot=" + sysroot] if sysroot else []) + \
+              (["-fuse-ld=lld"] if not toolchain.darwin() else []) + [src, "-o", os.path.join(d, "t")]
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         print(r.stdout + r.stderr, flush=True)
         errors = [l for l in r.stderr.splitlines() if "error" in l]
-        fail("The compiler could not build a test program: %s (install clang, lld and your system's C library headers: "
-             "libc6-dev on Debian and Ubuntu, glibc-devel on Fedora)" % (errors[0] if errors else "no message"))
+        fail("The compiler could not build a test program: %s" % (errors[0] if errors else "no message"))
 
 
 def requested_jobs(value):
@@ -544,7 +549,7 @@ def chosen_jobs(given):
 def bundled_mingw():
     """(as TotK Recomp's installer) llvm-mingw in the tools folder: its clang, headers and libraries build the game, and nothing of
     Visual Studio or the Windows SDK is needed. HOOKSHOT_MINGW set already wins; HOOKSHOT_MSVC=1: the Visual Studio route"""
-    if LINUX or os.environ.get("HOOKSHOT_MSVC") == "1":
+    if LINUX or DARWIN or os.environ.get("HOOKSHOT_MSVC") == "1":
         return os.environ.get("HOOKSHOT_MINGW", "")
     if not os.environ.get("HOOKSHOT_MINGW"):
         here = os.path.join(ROOT, "llvm-mingw")
@@ -586,7 +591,7 @@ def check_mingw():
 
 def check_windows_sdk():
     """The compiler is bundled; Microsoft's C library and Windows SDK may not be, by their licences. Found now, not 40 minutes in."""
-    if LINUX:
+    if LINUX or DARWIN:
         return check_linux_compiler()
     if bundled_mingw():
         return check_mingw()
@@ -653,7 +658,7 @@ def stop_stray_compilers(work, default_work):
     update mid-build) keeps its files open: the next build stopped at once with 'OSError: [Errno 22]' writing sa/gen/a64_fpx.h, or
     WinError 1224 on the play profile. Only that build goes: an earlier make_game on this work folder, the build and lift steps
     whose make_game is gone, and compilers whose command line names this work folder. Never this build or what started it."""
-    if LINUX:
+    if LINUX or DARWIN:
         return
     ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'clang*' -or $_.Name -like 'ld.lld*' -or $_.Name -like 'python*' } "
           "| Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress")
@@ -800,7 +805,7 @@ def drop_stale_objects(work):
     """(issue 231) Objects compiled against other system headers are not reused. A first build that compiled with an old Visual Studio's
     stdio.h (before 2015) left its objects in the cache; once the PC was fixed every later build reused them and the link failed on
     __iob_func. The headers the compiler finds are noted, and when they change the compiled objects go"""
-    if LINUX:
+    if LINUX or DARWIN:
         _drop_stale_linux(work)
         return
     sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
@@ -971,9 +976,9 @@ def folder_language(out):
 
 
 def profile_readable(prof):
-    """(linux) the profile is made by a recent clang (the Windows tools'): an older one, the system's, cannot read it and stops the
+    """(linux/darwin) the profile is made by a recent clang (the Windows tools'): an older one, the system's, cannot read it and stops the
     build. Then the game is built without it (a little slower in play), not at all"""
-    if not LINUX:
+    if not (LINUX or DARWIN):
         return True
     sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
     import toolchain
@@ -981,7 +986,8 @@ def profile_readable(prof):
         src = os.path.join(d, "t.c")
         with open(src, "w") as f:
             f.write("int f(int x) { return x + 1; }" + chr(10))
-        r = subprocess.run([toolchain.find("clang"), "-O2", "-Wno-everything", "-fprofile-instr-use=" + prof, "-c", src, "-o",
+        r = subprocess.run([toolchain.find("clang")] + toolchain.native_target() +
+                           ["-O2", "-Wno-everything", "-fprofile-instr-use=" + prof, "-c", src, "-o",
                             os.path.join(d, "t.o")], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         print("this compiler cannot read the play profile (%s): building without it" % (r.stderr.strip().splitlines() or ["?"])[-1],
@@ -1220,7 +1226,7 @@ def main(a=None):
     # (linux) the compiler probe waits until the compile. The game-free cache test stops at the lift, and a missing
     # compiler is still said before the long compile, not after the package has been read
     check_cpu()   # (no game read yet: the AppImage on a CPU without AVX2 stops here)
-    if not LINUX:
+    if not (LINUX or DARWIN):
         check_windows_sdk()
     stop_stray_compilers(work, a.default_work)
     drop_stale_objects(work)
@@ -1361,7 +1367,7 @@ def main(a=None):
         fail("The translated game came out cut short twice (%s). Check that the drive with %s has free space, and that no antivirus "
              "and no second Hookshot Builder is working in that folder, then update again." % (", ".join(cut[:6]), work))
 
-    if LINUX:
+    if LINUX or DARWIN:
         check_linux_compiler()
     # (the compile's timer: build.py reads the record of the earlier builds on this PC, says which files this run really
     # rebuilds and how long the rest will take, and reports each module's seconds; they go into the record below)
@@ -1446,7 +1452,7 @@ def main(a=None):
         launcher = launcher if os.path.isfile(launcher) else None
     game_dir = os.path.join(out, "bin") if launcher else out
     os.makedirs(game_dir, exist_ok=True)
-    ffmpeg_dlls = [] if LINUX else sorted(f for f in os.listdir(built) if f.endswith(".dll") and f.startswith(("av", "sw")))
+    ffmpeg_dlls = [] if (LINUX or DARWIN) else sorted(f for f in os.listdir(built) if f.endswith(".dll") and f.startswith(("av", "sw")))
     for n in BESIDE + ffmpeg_dlls:
         src = os.path.join(built, n)
         if os.path.exists(src):
@@ -1470,7 +1476,7 @@ def main(a=None):
             fail("Could not replace %s. Close any running copy of Hookshot and check that the file and folder are writable, then retry. "
                  "Staged replacements remain beside the installed files; the compiled source remains at %s." % (dst, src))
     if launcher:   # (a folder built before the launcher: its libraries left the folder for bin\; hookshot is the launcher now)
-        stale = [] if LINUX else sorted(f for f in os.listdir(out) if f.endswith(".dll") and f.startswith(("av", "sw")))
+        stale = [] if (LINUX or DARWIN) else sorted(f for f in os.listdir(out) if f.endswith(".dll") and f.startswith(("av", "sw")))
         for n in BESIDE[1:] + stale + ["hookshot.map", "hookshot-game.exe"]:
             try:
                 if os.path.isfile(os.path.join(out, n)):
@@ -1492,7 +1498,7 @@ def main(a=None):
         print("the button prompts of other controllers were not made: the game shows its own", flush=True)
         shutil.rmtree(prompts, ignore_errors=True)
     icon = os.path.join(ROOT, "assets", "hookshot.png")
-    if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
+    if (LINUX or DARWIN) and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
         copy_writable(icon, os.path.join(out, "hookshot.png"))   # (a second build overwrites the first's)
     seed_pipelines(out)
     ship_state_list(out)

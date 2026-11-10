@@ -442,6 +442,9 @@ typedef struct {
     DWORD64 Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15, Rip;
     DWORD EFlags, ContextFlags;
     DWORD64 Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;   /* (no thread's context is read or set here: GetThreadContext fails) */
+#if defined(__aarch64__)
+    DWORD64 X[31], Sp, Pc;
+#endif
 } CONTEXT, *PCONTEXT;
 #define EXCEPTION_SINGLE_STEP 0x80000004u
 #define CONTEXT_DEBUG_REGISTERS 0x100010

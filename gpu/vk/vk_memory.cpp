@@ -30,7 +30,7 @@
 #include "vk_gprof.h"      // (RX_VK_PASS_TIMING)
 #include "import_hold.h"
 #include "mirror_inherit.h"
-#ifdef __linux__
+#ifndef _WIN32
 #include <cerrno>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -546,7 +546,11 @@ bool memory_init() {
     p11.pNext = &p13;
     p2.pNext = &hp;
     vkGetPhysicalDeviceProperties2(dev.physical, &p2);
+#if defined(_WIN32)
     align = std::max<uint64_t>(hp.minImportedHostPointerAlignment, 4096);
+#else
+    align = std::max<uint64_t>(hp.minImportedHostPointerAlignment, (uint64_t)sysconf(_SC_PAGESIZE));
+#endif
     max_import_size = std::min(p11.maxMemoryAllocationSize, p13.maxBufferSize);
     logf("vk: guest memory imported in place (alignment %llu)", (unsigned long long)align);
     return true;

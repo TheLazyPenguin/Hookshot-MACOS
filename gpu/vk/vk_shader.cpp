@@ -534,7 +534,7 @@ Shader::Profile make_profile() {
 
 Shader::HostTranslateInfo host_info() {
     Shader::HostTranslateInfo h{};
-    h.support_float64 = true;
+    h.support_float64 = dev.features.shaderFloat64;
     // (RX_VK_NO_F16, a test: the game's f16 math lowered to f32, as a card without f16 shaders would need (GTX 10xx, issue 98). Eden's
     // lowering made a picture of noise of Kokiri on an RTX card, so it is not used by itself)
     h.support_float16 = !getenv("RX_VK_NO_F16");
